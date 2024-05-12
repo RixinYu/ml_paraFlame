@@ -1,7 +1,7 @@
 
 import torch
 import torch.nn as nn
-
+import re
 #---
 class Fc_PDEpara(nn.Module):
     def __init__(self, in_feature, out_feature,  nDepth=1, ClassStyle = '', OutValueRange=0.2 ): #bNormalize=0,
@@ -16,15 +16,17 @@ class Fc_PDEpara(nn.Module):
             in_feature = in_feature + self.nDepth_OneHotInput
             out_feature = out_feature//self.nDepth_OneHotInput
 
-        if 'M' in ClassStyle:  # MLP
+        if 'm' in ClassStyle.casefold():  # MLP
             self.fc_net = nn.Sequential( nn.Linear( in_feature , 50 ), nn.ReLU(),
                                          nn.Linear( 50, out_feature ), nn.Sigmoid() )
-        elif 'L' in ClassStyle: # linear
-             self.fc_net = nn.Sequential( nn.Linear( in_feature, out_feature ), nn.Sigmoid() )
-        else:
-            self.fc_net = nn.Sequential(nn.Linear( in_feature,   15),  nn.ReLU(),
-                                        nn.Linear( 15, 15 ),           nn.ReLU(),
-                                        nn.Linear( 15, out_feature ),  nn.Sigmoid()             )
+        elif 'l' in ClassStyle.casefold(): # linear
+            self.fc_net = nn.Sequential( nn.Linear( in_feature, out_feature ), nn.Sigmoid() )
+
+        else: #  # deep net or default
+            m = 50   if 'd50' in ClassStyle.casefold() else  15
+            self.fc_net = nn.Sequential(nn.Linear( in_feature,   m),  nn.ReLU(),
+                                        nn.Linear( m, m ),           nn.ReLU(),
+                                        nn.Linear( m, out_feature ),  nn.Sigmoid()             )
 
 
     def forward( self, x):
@@ -100,8 +102,57 @@ class MyConvNd(nn.Module):  # keep strid ==1
     def forward(self, x):
         return self.net(x)
 
-#------------------------------
 
+###########################################################################
+#  Copy from torch.nn.modules.padding (2023), can be deleted if torch 2023 is installed
+#########################################################################
+from torch.nn.modules.module import Module
+from torch import Tensor
+from torch.nn.modules.utils import _pair, _quadruple, _ntuple
+from torch.nn import functional as F
+from torch.nn.common_types import _size_2_t, _size_4_t, _size_6_t
+from typing import Sequence, Tuple
+
+class _CircularPadNd(Module):
+    __constants__ = ['padding']
+    padding: Sequence[int]
+    def _check_input_dim(self, input):
+        raise NotImplementedError
+    def forward(self, input: Tensor) -> Tensor:
+        self._check_input_dim(input)
+        return F.pad(input, self.padding, 'circular')
+    def extra_repr(self) -> str:
+        return f'{self.padding}'
+
+class torch_nn_CircularPad1d(_CircularPadNd):
+    padding: Tuple[int, int]
+    def __init__(self, padding: _size_2_t) -> None:
+        super().__init__()
+        self.padding = _pair(padding)
+
+    def _check_input_dim(self, input):
+        if input.dim() != 2 and input.dim() != 3:
+            raise ValueError(                f"expected 2D or 3D input (got {input.dim()}D input)"            )
+class torch_nn_CircularPad2d(_CircularPadNd):
+    padding: Tuple[int, int, int, int]
+    def __init__(self, padding: _size_4_t) -> None:
+        super().__init__()
+        self.padding = _quadruple(padding)
+    def _check_input_dim(self, input):
+        if input.dim() != 3 and input.dim() != 4:
+            raise ValueError(              f"expected 3D or 4D input (got {input.dim()}D input)"            )
+#########################################################################
+#
+#########################################################################
+
+def nn_CircularPadNd(nDIM): # RY add the 'circlar' pad, April 9, 2024
+    if nDIM==1:
+        return torch_nn_CircularPad1d
+    elif nDIM==2:
+        return torch_nn_CircularPad2d
+    else:
+        raise ValueError('nn_CircularPadNd: nDIM='+str(nDIM) )
+#------------------------------
 
 def nn_ConvNd(nDIM):
     if nDIM==1:
@@ -177,21 +228,23 @@ class InceptionND_v3(nn.Module):
         ###################################
         self.branch2 = nn.Sequential(
             nn_ConvNd(nDIM)(in_channels=in_fts, out_channels=out_fts[1], kernel_size=1, stride=1),
-            nn_ConvNd(nDIM)(in_channels=out_fts[1], out_channels=out_fts[1], kernel_size=3, stride=1, padding=1,
-                            padding_mode='circular'),
+            nn_ConvNd(nDIM)(in_channels=out_fts[1], out_channels=out_fts[1], kernel_size=3, stride=1, padding=1,   padding_mode='circular'),
         )
         ###################################
         ###  3x3 MAX POOL  +  1x1 CONV
         ###################################
         self.branch3 = nn.Sequential(
-            nn_MaxPoolNd(nDIM)(kernel_size=3, stride=1, padding=1),
-            nn_ConvNd(nDIM)(in_channels=in_fts, out_channels=out_fts[2], kernel_size=1, stride=1)
+            #nn_MaxPoolNd(nDIM)(kernel_size=3, stride=1, padding=1),
+            #nn_ConvNd(nDIM)(in_channels=in_fts, out_channels=out_fts[2], kernel_size=1, stride=1)
+            nn_CircularPadNd(nDIM)(1),                                                                                             # RY add the 'circlar' pad, April 9, 2024
+            nn_MaxPoolNd(nDIM)(kernel_size=3, stride=1, padding=0),                                                          # RY add the 'circlar' pad, April 9, 2024
+            nn_ConvNd(nDIM)(in_channels=in_fts, out_channels=out_fts[2], kernel_size=1, stride=1, padding_mode='circular')   # RY add the 'circlar' pad, April 9, 2024
         )
         ###################################
         ###  1x1 CONV
         ###################################
         self.branch4 = nn.Sequential(
-            nn_ConvNd(nDIM)(in_channels=in_fts, out_channels=out_fts[3], kernel_size=1, stride=1)
+            nn_ConvNd(nDIM)(in_channels=in_fts, out_channels=out_fts[3], kernel_size=1, stride=1, padding_mode='circular')  #  RX correction of 'circlar' pad, April 9, 2024
         )
 
     def forward(self, input):

@@ -14,7 +14,8 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from flame_net.MyConvNd import MyConvNd, nn_MaxPoolNd, nn_AvgPoolNd , Fc_PDEpara  # ,nn_BatchNormNd
+from flame_net.MyConvNd import MyConvNd, nn_MaxPoolNd, nn_AvgPoolNd , Fc_PDEpara , my_NormNd # ,nn_BatchNormNd
+
 
 
 
@@ -33,7 +34,8 @@ class ConvPDE_Nd(nn.Module):
                  num_PDEParameters=0 ,
                  method_BatchNorm=0,
                  PDEPara_depth =  None , # or None
-                 method_ParaEmbedding = False
+                 PDEPara_PathNum = 1,     # allowing multiple paths for parameter network
+                 method_ParaEmbedding = 0,
                  #bExternalConstraint = False
                  #,yB_1DNormalization =None
                  ):
@@ -79,9 +81,9 @@ class ConvPDE_Nd(nn.Module):
         en_channels   =  en1_channels[:] #make a copy
         for l, _ in enumerate(en_channels ):
             if self.method_ParaEmbedding == True :
-                first_channel = in_channel + self.in_channel if l==0 else en_channels[l-1][-1]
+                first_channel = self.in_channel + self.num_PDEParameters if l==0 else en_channels[l-1][-1]
             else:
-                first_channel = in_channel                   if l==0 else en_channels[l-1][-1]
+                first_channel = in_channel                               if l==0 else en_channels[l-1][-1]
 
             en_channels[l] = [first_channel] + en_channels[l]
         self.en_channels  = en_channels
@@ -151,8 +153,10 @@ class ConvPDE_Nd(nn.Module):
         self.bRelu_Conv0__en = True if 'all' in method_nonlinear.casefold() else False
         self.bRelu_Conv0__de = True if ('all' in method_nonlinear.casefold() or 'de' in method_nonlinear.casefold() ) else False
 
+
         #---------------
         self.en_conv0= nn.ModuleList()
+
 
         for l , channels_list in enumerate(self.en_channels) :
             layers =[]
@@ -162,9 +166,20 @@ class ConvPDE_Nd(nn.Module):
             my_bNorm= method_BatchNorm if method_BatchNorm<=0 else method_BatchNorm//2**l
 
             for idx in range( len(channels_list)-1):
-                layers.append( MyConvNd(nDIM, channels_list[idx],channels_list[idx+1],kernel_size=3, type=self.en_types[l][idx], bRelu=self.bRelu_Conv0__en, bNorm=my_bNorm )  )
+                #-------------
+                _bRelu_Conv0__en_ = self.bRelu_Conv0__en
+                _my_bNorm_ = my_bNorm
+                if method_nonlinear.casefold()=='all_delay':
+                    if self.num_PDEParameters>=1 : 
+                        if l <= PDEPara_depth -1:
+                            _my_bNorm_=0 
+                            if idx==len(channels_list)-2: 
+                               _bRelu_Conv0__en_ = False
+                #---------------
+                layers.append( MyConvNd(nDIM, channels_list[idx],channels_list[idx+1],kernel_size=3, type=self.en_types[l][idx], bRelu= _bRelu_Conv0__en_ , bNorm=_my_bNorm_ )  )
 
             self.en_conv0.append( nn.Sequential( *layers ) )
+
         #----------------
 
         if self.num_PDEParameters>=1: # learning  PDEs with multi parameters
@@ -181,18 +196,41 @@ class ConvPDE_Nd(nn.Module):
             #                         nn.Linear( 15, 15),                      nn.ReLU(), # nn.Sigmoid(), #  nn.ReLU(),
             #                         nn.Linear( 15, self.PDEPara_depth ),     nn.Tanh()
             #                       )
-            self.fc_PDEPara = Fc_PDEpara(self.num_PDEParameters, self.PDEPara_depth ) #, method_BatchNorm  )
+
+            self.fc_PDEPara = Fc_PDEpara(self.num_PDEParameters, self.PDEPara_depth*PDEPara_PathNum, OutValueRange = 1 ) #, method_BatchNorm  )
+            #self.fc_PDEPara = Fc_PDEpara(self.num_PDEParameters, self.PDEPara_depth*PDEPara_PathNum , ClassStyle = 'd50', OutValueRange = 1)
+
+            if method_nonlinear.casefold()=='all_delay':
+                self.en_delay_nonlinear_norm = nn.ModuleList() # nn.RelU()
+
 
             self.en_conv_PDEPara = nn.ModuleList()
+
             for l in range( self.PDEPara_depth ):
                 layers_ex = []
                 if l >0:      layers_ex.append( PoolNd )
 
+                #-------------
                 my_bNorm= method_BatchNorm if method_BatchNorm<=0 else method_BatchNorm//2**l
 
+                _my_bNorm_ = my_bNorm
+                _bRelu_Conv0__en_ = self.bRelu_Conv0__en
+                if method_nonlinear.casefold()=='all_delay':
+                    _my_bNorm_= 0
+                    _bRelu_Conv0__en_ = False
+                #---------------
+                layers_ex.append( MyConvNd( nDIM, en_channels[l][0] , en_channels[l][-1], kernel_size = 3, type=self.en_types[l][-1], bRelu= _bRelu_Conv0__en_ ,  bNorm=_my_bNorm_ ) )
 
-                layers_ex.append( MyConvNd( nDIM, en_channels[l][0] , en_channels[l][-1], kernel_size = 3, bNorm=my_bNorm ) )
-                self.en_conv_PDEPara.append(  nn.Sequential( *layers_ex )  )
+                for k in range(PDEPara_PathNum):
+                    self.en_conv_PDEPara.append(  nn.Sequential( *layers_ex )  )
+                
+                if method_nonlinear.casefold()=='all_delay':
+                    layer_ex_delay=[]
+                    if my_bNorm:
+                        layer_ex_delay.append( my_NormNd(self.nDIM, en_channels[l][-1] ,my_bNorm)  )
+                    layer_ex_delay.append( nn.ReLU() )
+
+                    self.en_delay_nonlinear_norm.append( nn.Sequential( *layer_ex_delay ) )
 
 
         #---------------
@@ -238,14 +276,24 @@ class ConvPDE_Nd(nn.Module):
     def encoder(self,x, weight_scaling = None ):
         x_all = []
 
+
         for l, _ in enumerate(self.en_conv0):
             x_en = self.en_conv0[l](x)
 
             #if weight_scaling is not None:
             if self.num_PDEParameters >=1:
-                if l < len(self.en_conv_PDEPara):
-                    x_en = x_en + weight_scaling[:,l].view(-1, *((self.nDIM+1)*[1]) ) * self.en_conv_PDEPara[l](x)
+                if l < self.PDEPara_depth : # len(self.en_conv_PDEPara):
+
+                    PDEPara_PathNum = len(self.en_conv_PDEPara)//self.PDEPara_depth
+
+                    for k in range(PDEPara_PathNum):
+                        k_l =  k + l*PDEPara_PathNum
+                        x_en = x_en + weight_scaling[:,k_l].view(-1, *((self.nDIM+1)*[1]) ) * self.en_conv_PDEPara[k_l](x)
+
                     #                                 view(-1,1,1,1)
+
+                    if hasattr(self, 'en_delay_nonlinear_norm'):
+                        x_en= self.en_delay_nonlinear_norm[l]( x_en )
 
             x_all.append(x_en)
 

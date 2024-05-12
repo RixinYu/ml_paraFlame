@@ -73,13 +73,22 @@ class libData:
         return sequence_disp
 
     @staticmethod
-    def Reorg_list_xsol(list_xsol, list_nu, T_out, T_in, nStep=1, nStepSkip=1, name_xsol='dsol'):
+    def Reorg_list_xsol(list_xsol, list_para, T_out, T_in, nStep=1, nStepSkip=1, name_xsol='dsol'):
         x_all = []
         nu_all = []
         for idx, xsol in enumerate(list_xsol):
             xsol_tmp = libData.Reorg_xsol(xsol, T_out, T_in, nStep, nStepSkip, name_xsol)
             x_all.append(xsol_tmp)
-            nu_all.append(list_nu[idx] * np.ones(xsol_tmp.shape[0]))
+
+            #nu_all.append(             list_para[idx] * np.ones(xsol_tmp.shape[0])   )
+            nu_all.append(   np.tile( list_para[idx],                         (xsol_tmp.shape[0], 1)  ) )
+
+            #-------------
+            #if type( list_para[idx] ) is list:
+            #    nu_all.append( np.tile( np.array(list_para[idx], dtype=float), (xsol_tmp.shape[0], 1)  ) )
+            #else: # if it is a number
+            #    nu_all.append( np.tile( list_para[idx],                        (xsol_tmp.shape[0], 1)  ) )
+            #----------------------------
 
         x_all = np.concatenate(x_all, axis=0)
         nu_all = np.concatenate(nu_all, axis=0)

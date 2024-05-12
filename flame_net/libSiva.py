@@ -14,10 +14,13 @@ import matplotlib.pyplot as plt
 #from scipy.interpolate import interp1d
 import os
 import pickle
-import torch
-
+import warnings
+#import torch
 
 from flame_net.libData import libData
+
+
+from scipy.optimize import fsolve
 
 
 
@@ -48,6 +51,7 @@ class libSiva:
             params.setdefault('mu',0.1)
             params.setdefault('nu',0.1)
             params.setdefault('d_ratio',0.6)
+            params.setdefault('tau',1)
             params.setdefault('N',256)
             params.setdefault('Nstep',1000)
             params.setdefault('dt',0.15)
@@ -73,14 +77,14 @@ class libSiva:
 
             u0 = libSiva.d_to_u(d0, libSiva.get_k(N,L) )
 
-            usol = libSiva.RK4NumericalSolver_usol( u0, t,  params['Lpi'], params['mu'],params['nu'], params['d_ratio'],  params['n_dt'])
+            usol = libSiva.RK4NumericalSolver_usol( u0, t,  params['Lpi'], params['mu'],params['nu'], params['d_ratio'], params['tau'],  params['n_dt'])
 
             plt.contourf(usol.transpose(1,0), 20); plt.colorbar()
             #plt.imshow(usol.transpose(1,0))  #plt.colorbar()
 
             if params['show_ani']==True:
                 k = libSiva.get_k(N,L)
-                dsol = libSiva.usol_to_dsol(usol.numpy(),k)
+                dsol = libSiva.usol_to_dsol(usol,k)
                 x = libSiva.get_x(N, L )
                 ani = libSiva.anim_N_dsol(t, x, [dsol], nskip=4, n0=0, interval=0.1, ylim_plot=[-L/2 , L/2])
                 return ani
@@ -105,6 +109,77 @@ class libSiva:
             if params['randfft']==True:     d0 = libSiva.rand_d0_FFT( params['N'], np.random.randint(low=2, high=8) )
             else:                           d0 = libSiva.rand_d0_simple( params['N'] , {'siva_sys_name':'KS_RK4', 'para_value':params['Lpi'] } )
             return libSiva.demo('ks',params = {'Lpi':params['Lpi'], 'mu':1, 'nu':1, 'd_ratio':0, 'N':params['N'], 'dt':0.15, 'Nstep':params['Nstep'], 'n_dt':5, 'show_ani':False,'d0':d0 , 'show_ani':params['show_ani'] }  )
+
+        elif method =='MKS_RK4':
+            params.setdefault('max_amplitude',0.25)
+            params.setdefault('rho',0.5)
+            params.setdefault('Lpi',30)
+
+            params['d_ratio'] = params['rho']* (4*params['max_amplitude'])
+            params['mu'], params['nu'], params['tau'] = libSiva.Coeff_Lpi_d_to_mu_nu_tau( params['Lpi'], params['d_ratio'], params['max_amplitude'] )
+
+            params.setdefault('N',256)
+            params.setdefault('dt',0.015*params['Lpi'])
+            params.setdefault('n_dt',5)
+            params.setdefault('Nstep',1000)
+            params.setdefault('randfft',False)
+            params.setdefault('show_ani',False)
+            params.setdefault( 'noise_level', 0)
+            params.setdefault('bSym',False)
+
+
+            libSiva.demo('any',  params )
+
+
+        elif method == 'any':
+            params.setdefault('Lpi',1)
+            params.setdefault('mu',0)
+            params.setdefault('nu',0.025)
+            params.setdefault('d_ratio',1)
+            params.setdefault('tau',1)
+            params.setdefault('N',256)
+            params.setdefault('Nstep',1000)
+            params.setdefault('dt',0.015)
+            params.setdefault('n_dt',5)
+            params.setdefault('show_ani',False)
+            params.setdefault('randfft', False)
+            params.setdefault( 'noise_level', 0)
+            params.setdefault('bSym',False)
+
+            N = params['N']
+            t = np.arange( params['Nstep'] )*params['dt']
+            L = 2*np.pi
+
+            u0 = 0.02*(np.random.rand(  params['N'] )-0.5)
+
+            for key in params:
+                if key == 'd0':          print(key+": given" ,end=' , ' )
+                else:                    print(key+":", params[key],end=' , ' )
+            print("")
+
+
+
+            usol = libSiva.RK4NumericalSolver_usol( u0, t,  params['Lpi'], params['mu'], params['nu'], params['d_ratio'], params['tau'], params['n_dt'], params['noise_level'] , bSym = params['bSym']  )
+
+            fig, axs = plt.subplots(1,3, figsize=(20,4))
+            ax = axs[0]
+            im = ax.contourf(usol.transpose(1,0),20); fig.colorbar(im, ax=ax )
+
+            ax = axs[1]
+            ax.plot(  libSiva.u_to_d( usol[-1]                  , bSym = params['bSym'] )  , '-r' )
+            ax.plot(  libSiva.u_to_d( usol[params['Nstep']//2]  , bSym = params['bSym'] )  , '-.b' )
+            ax.plot(  libSiva.u_to_d( usol[params['Nstep']//4]  , bSym = params['bSym'] )  , ':c' )
+            ax.plot(  libSiva.u_to_d( usol[params['Nstep']//8]  , bSym = params['bSym'] )  , '--g' )
+
+            ax = axs[2]
+
+            k = np.arange(N//2+1)*( 2*np.pi/(L*params['Lpi'])  )
+            disp_relation = params['mu']*k**4   -params['nu']*k**2- params['d_ratio']*k
+
+            ax.plot(  -disp_relation  , '-ro' )
+            ax.set_ylim( [0, np.max(-disp_relation) ])
+
+
 
         elif method=='MS_1stEuler':
             params.setdefault('Nstep',1000)
@@ -211,16 +286,8 @@ class libSiva:
             return ani
 
         elif method=='ms5':
-            # T = 150
-            # T = 150
-            # t = np.linspace(0,T,10001)
 
-            # T = 1.5
-            # t = np.linspace(0,T,101)
-
-            # T = 30 ;       t = np.linspace(0,T,2001)
-
-            T = 10;
+            T = 10
             t = np.linspace(0, T, 1001)
 
             # T = 1500 ;        t = np.linspace(0,T,100001)
@@ -461,29 +528,54 @@ class libSiva:
         return usol
 
     @staticmethod
-    def RK4NumericalSolver_dsol(d0,t,Lpi=6.28, mu=1, nu=1, d_ratio=0, n_dt=1):
+    def RK4NumericalSolver_dsol(d0,t,Lpi=6.28, mu=1, nu=1, d_ratio=0, tau=1, n_dt=1):
         N = d0.shape[0]
         L = 2*np.pi  # *Lpi
         k = libSiva.get_k(N,L)
         u0  = libSiva.d_to_u( d0, k)
-        usol = libSiva.RK4NumericalSolver_usol( u0 , t, Lpi, mu, nu, d_ratio, n_dt)
-        dsol = libSiva.usol_to_dsol(usol.numpy(),k)
+        usol = libSiva.RK4NumericalSolver_usol( u0 , t, Lpi, mu, nu, d_ratio, tau, n_dt)
+        dsol = libSiva.usol_to_dsol(usol,k)
         return dsol
 
+    #---------------
+    # mu,nu, tau = libSiva.Coeff_Lpi_d_to_mu_nu_tau(Lpi, d_ratio, max_amplitude ):
     @staticmethod
-    def RK4NumericalSolver_usol(u0,t,Lpi=6.28, mu=1,nu=1, d_ratio=0,n_dt=1 ):
+    def Coeff_Lpi_d_to_mu_nu_tau(Lpi, d_ratio, max_amplitude=0.25):
+        #-----------------------------
+        def d_to_mu_nu(d_ratio, max_amplitude=0.25):
+            #--------------------
+            def func_SivaEq_Coeff_Relations(arg, d_ratio, max_amplitude=0.25 ):
+                mu, k_star = arg
+                nu = mu - d_ratio
+                unk = np.zeros(2)
+                unk[0]= 4*mu*k_star**3 - 2*nu*k_star - d_ratio
+                unk[1]= mu*k_star**4 - nu*k_star**2 - d_ratio * k_star  + max_amplitude
+                return unk
+            #------------------
+            func = lambda arg : func_SivaEq_Coeff_Relations(arg, d_ratio, max_amplitude  )
+            root = fsolve(func, [4, 0.6]) # the starting value '4' may affect the result seraching
+            mu = root[0]
+            nu = mu-d_ratio
+            return mu, nu
+        #-----------------
+        mu,nu = d_to_mu_nu(d_ratio, max_amplitude )
+        tau = (Lpi/10*d_ratio) + (1-d_ratio)
+        return mu,nu, tau
+
+    @staticmethod
+    def RK4NumericalSolver_usol(u0,t,Lpi=6, mu=1,nu=1, d_ratio=0,  tau=1, n_dt=1 , noise_level = 0,    bSym = False  ):
         '''
             SivashinkskyEquation for the slope u(x,t)
 
-                u_t + u*u_x + (mu)*u_xxxx - (nu)*u_xx  - (d_ratio)*Gamma(u) =0
+                u_t /tau + u*u_x + (mu)*u_xxxx + (nu)*u_xx  - (d_ratio)*Gamma(u) =0
 
             with peroidic condition u(x,t) = u(x+L,t) and domain size being L = 2*pi*(Lpi)
 
             Note:
             (i ) It reduce to Kuramato-Sivashinksky(KS) Equation when d_ratio=0 and nu<0
-                   u_t + u*u_x  + (mu)*u_xxxx  + (-nu)*u_xx  = 0
+                   u_t + u*u_x  + (mu)*u_xxxx  + (nu)*u_xx               = 0
             (ii) It reduce to Micheal-Sivashinksky(KS) Equation through setting mu=0, nu>0 and d_ratio=1
-                   u_t + u*u_x  - (nu)*u_xx    - Gamma(u) =0
+                   u_t + u*u_x                 + (nu)*u_xx    - Gamma(u) = 0
 
             ---  The RK4-solution process----
             step1:
@@ -500,33 +592,143 @@ class libSiva:
         N = u0.shape[0]
 
         dt = (t[1]-t[0] )/n_dt
+        dt = dt*tau              # tau can be considered to re-scale the output time step
 
-        usol = torch.zeros( (t.size, u0.size) )
-        usol[0, : ] = torch.tensor(u)
+        L = 2*np.pi *Lpi
 
-        uhat = torch.fft.rfft(torch.tensor(u))
+        if bSym == False:
+            usol = np.zeros( (t.size,  u0.size) )
+            usol[0, : ] =  u
+        elif bSym==True:
+            usol = np.zeros( (t.size,  u0.size) )
 
         if (t.size > 1000):     print('RK4NumericalSolver_usol: large t.size=(', t.size, '); a single-dot is printed for 1000 steps')
 
-        L = 2*np.pi *Lpi
-        k = torch.arange(N//2+1) * (2*np.pi/L)
+        if bSym == True:
+            k = np.arange(N+1) * (  2*np.pi/(2*L)  )
+
+            uhat = scipy.fft.rfft( np.concatenate( (u, -np.flip(u,-1) ) , -1 )  )
+
+            corr_half = np.exp( - 1j * 2*np.pi* np.arange(N+1)  * 0.5/(2*N) )
+
+            uhat=( 1j* (uhat*corr_half).imag )/ corr_half
+
+            #uhat =   1j* uhat.imag
+
+        elif bSym == False:
+
+            k = np.arange(N//2+1)*( 2*np.pi/L      )
+            uhat = scipy.fft.rfft( u )
+        #-----
+        g = -0.5j * dt * k
+        E = np.exp( -dt/2 * (       mu* k**4   - nu* k**2- d_ratio*k  )  )
+        E2 = E**2
+        #-----
+
         for j  in range( t.size -1 ) :
+
             #t = n*dt
+
             for n in range(n_dt):
-                g = -0.5j * dt * k
-                E = torch.exp( -dt/2 * (       mu* k**4 - nu* k**2- d_ratio*k  )  )
-                E2 = E**2
-                a = g* torch.fft.rfft( torch.fft.irfft(   uhat       )**2 )
-                b = g* torch.fft.rfft( torch.fft.irfft( E*(uhat+a/2) )**2)   #  4th order
-                c = g* torch.fft.rfft( torch.fft.irfft( E*uhat+b/2   ) **2 ) #  Runge-Kutta
-                d = g* torch.fft.rfft( torch.fft.irfft( E2*uhat+E*c  )**2 )
+
+                a = g* scipy.fft.rfft( scipy.fft.irfft(    uhat       )**2 )
+                b = g* scipy.fft.rfft( scipy.fft.irfft( E*(uhat+a/2)  )**2 )  #  4th order
+                c = g* scipy.fft.rfft( scipy.fft.irfft( E* uhat+b/2   )**2 ) #  Runge-Kutta
+                d = g* scipy.fft.rfft( scipy.fft.irfft( E2*uhat+E*c   )**2 )
+
                 uhat = E2 * uhat + (E2 * a + 2*E*(b+c) + d)/6
 
-            #-----
-            usol[j+1, :] = torch.fft.irfft(uhat)
+                if bSym == True:
+                    #uhat =   1j* uhat.imag
+                    uhat =( 1j* (uhat*corr_half).imag )/ corr_half
+
+
+            if noise_level != 0:
+                #--------
+                d_hat = uhat
+                d_hat[1:] = -1j * uhat[1:] / k[1:] ;          d_hat[0]=0
+                dd =  scipy.fft.irfft( d_hat )
+                #--------
+                if bSym == True:
+                    eps = np.random.normal(size = 2*N)
+                else:
+                    eps = np.random.normal(size =   N)
+
+
+                dd += noise_level*eps
+
+                #----
+                uhat = 1j * scipy.fft.rfft( dd ) * k
+
+            #-----------
+
+            if bSym == True:
+                usol[j+1, :] = scipy.fft.irfft(uhat) [...,:N]
+
+            elif bSym == False:
+                usol[j+1, :] = scipy.fft.irfft(uhat)
+
             if( j%1000==0):  print( '', end='.')
 
         return usol
+
+    # @staticmethod
+    # def RK4NumericalSolver_usol(u0,t,Lpi=6.28, mu=1,nu=1, d_ratio=0,n_dt=1 ):
+    #     '''
+    #         SivashinkskyEquation for the slope u(x,t)
+    #
+    #             u_t + u*u_x + (mu)*u_xxxx - (nu)*u_xx  - (d_ratio)*Gamma(u) =0
+    #
+    #         with peroidic condition u(x,t) = u(x+L,t) and domain size being L = 2*pi*(Lpi)
+    #
+    #         Note:
+    #         (i ) It reduce to Kuramato-Sivashinksky(KS) Equation when d_ratio=0 and nu<0
+    #                u_t + u*u_x  + (mu)*u_xxxx  + (-nu)*u_xx  = 0
+    #         (ii) It reduce to Micheal-Sivashinksky(KS) Equation through setting mu=0, nu>0 and d_ratio=1
+    #                u_t + u*u_x                  - (nu)*u_xx    - Gamma(u) =0
+    #
+    #         ---  The RK4-solution process----
+    #         step1:
+    #                 u = sum { uhat(k) * e^(2*pi*k * x/L )  }
+    #         step2:
+    #                 d/dt(u_hat) +  [ mu*(2**pi/L*k)^4  - nu*(2*pi/L*k)^2  - d_ratio*(2*pi/L*|k|) ]*u_hat = -0.5*i* (2*pi/L*k) u2_hat
+    #         step3(integrator factor):
+    #                 g = e^(lambda*t)     , lambda =   mu*(2*pi/L*k)^4  - nu*(2*pi/L*k)^2 - d_ratio*(2*pi/L*|k|)
+    #         step4:
+    #                 d/dt[ e^(lambda*t) * uhat  ] = -0.5*i* (2*pi/L*k) u2_hat * e^(lambda*t)
+    #     '''
+    #     u = u0
+    #
+    #     N = u0.shape[0]
+    #
+    #     dt = (t[1]-t[0] )/n_dt
+    #
+    #     usol = torch.zeros( (t.size, u0.size) )
+    #     usol[0, : ] = torch.tensor(u)
+    #
+    #     uhat = torch.fft.rfft(torch.tensor(u))
+    #
+    #     if (t.size > 1000):     print('RK4NumericalSolver_usol: large t.size=(', t.size, '); a single-dot is printed for 1000 steps')
+    #
+    #     L = 2*np.pi *Lpi
+    #     k = torch.arange(N//2+1) * (2*np.pi/L)
+    #     for j  in range( t.size -1 ) :
+    #         #t = n*dt
+    #         for n in range(n_dt):
+    #             g = -0.5j * dt * k
+    #             E = torch.exp( -dt/2 * (       mu* k**4 - nu* k**2- d_ratio*k  )  )
+    #             E2 = E**2
+    #             a = g* torch.fft.rfft( torch.fft.irfft(   uhat       )**2 )
+    #             b = g* torch.fft.rfft( torch.fft.irfft( E*(uhat+a/2) )**2)   #  4th order
+    #             c = g* torch.fft.rfft( torch.fft.irfft( E*uhat+b/2   ) **2 ) #  Runge-Kutta
+    #             d = g* torch.fft.rfft( torch.fft.irfft( E2*uhat+E*c  )**2 )
+    #             uhat = E2 * uhat + (E2 * a + 2*E*(b+c) + d)/6
+    #
+    #         #-----
+    #         usol[j+1, :] = torch.fft.irfft(uhat)
+    #         if( j%1000==0):  print( '', end='.')
+    #
+    #     return usol
 
 
 
@@ -850,17 +1052,46 @@ class libSiva:
 
     """ slope to displacment """
     @staticmethod
-    def u_to_d(u, k=None):
-        #d_hat = 1j * scipy.fftpack.fft( u ) / k
-        if k is None:
-            k = libSiva.get_k(u.shape[-1], np.pi *2 )  # default
+    def u_to_d(u, k=None, bSym =False ) :
+        if k is None :
+            if  bSym==True:
+                N = u.shape[-1]
+                k = libSiva.get_k( 2*N, np.pi *2 )  # default
+                #-----------
+                uhat =  scipy.fft.rfft( np.concatenate( (u, -np.flip(u,-1)) , -1)  )
 
-        u_hat =  scipy.fft.rfft(u)
-        d_hat = u_hat
-        d_hat[1:] = -1j * u_hat[1:] / k[1:]
-        d_hat[0]=0
-        d =  scipy.fft.irfft( d_hat ) #.real
+                d_hat = uhat
+                d_hat[1:] = -1j * uhat[1:] / k[1:]
+                d_hat[0]=0
+                d =  scipy.fft.irfft( d_hat ) #.real
+                d = d[ :N ]
+
+            elif  bSym==False:
+                k = libSiva.get_k(u.shape[-1], np.pi *2 )  # default
+                u_hat =  scipy.fft.rfft(u)
+                d_hat = u_hat
+                d_hat[1:] = -1j * u_hat[1:] / k[1:]
+                d_hat[0]=0
+                d =  scipy.fft.irfft( d_hat ) #.real
+        else:
+                u_hat =  scipy.fft.rfft(u)
+                d_hat = u_hat
+                d_hat[1:] = -1j * u_hat[1:] / k[1:]
+                d_hat[0]=0
+                d =  scipy.fft.irfft( d_hat ) #.real
+
         return d
+    # @staticmethod
+    # def u_to_d(u, k=None):
+    #     if k is None:
+    #         k = libSiva.get_k(u.shape[-1], np.pi *2 )  # default
+    #
+    #     u_hat =  scipy.fft.rfft(u)
+    #     d_hat = u_hat
+    #     d_hat[1:] = -1j * u_hat[1:] / k[1:]
+    #     d_hat[0]=0
+    #     d =  scipy.fft.irfft( d_hat ) #.real
+    #     return d
 
     @staticmethod
     def usol_to_dsol(usol, k=None):
@@ -939,7 +1170,10 @@ class libSiva:
 
 class CSolverSiva:
     def __init__(self,siva_sys_name, list_para, method_default_siva_data_gen=1) :
-        assert( siva_sys_name in ['MS_1stEuler', 'MS_RK4', 'KS_RK4'] )
+        #assert()
+        if siva_sys_name not in ['MS_1stEuler', 'MS_RK4', 'KS_RK4','MKS_RK4']:
+            warnings.warn('do not find CSolverSiva.siva_sys_name')
+
 
         self.L = 2*np.pi
         self.siva_sys_name = siva_sys_name
@@ -1096,6 +1330,53 @@ class CSolverSiva:
                 (1, 12501, 18, 'rand_simple'  ) ,                                   (25, 501, 18, 'rand_simple' ) ,
                 (1, 12501, 24, 'rand_simple'  ) ,                                   (25, 501, 24, 'rand_simple' )         ]
 
+        elif  all( item in [[10,0],[10,0.25],[10,0.5], [10,0.75], [10,1],
+                            [25,0],[25,0.25],[25,0.5], [25,0.75], [25,1],
+                            [40,0],[40,0.25],[40,0.5], [40,0.75], [40,1]        ] for item in self.list_para ) \
+        and self.siva_sys_name =='MKS_RK4':
+            self.N = 256
+            self.dt_Output =0.15
+            self.default_training_infolist_generate_data  =   [
+                (1, 125001, [40, 0   ], 'rand_simple' ), (250, 501, [40, 0   ], 'rand_simple' ) ,
+                (1, 125001, [40, 0.25], 'rand_simple' ), (250, 501, [40, 0.25], 'rand_simple' ) ,
+                (1, 125001, [40, 0.5 ], 'rand_simple' ), (250, 501, [40, 0.5 ], 'rand_simple' )  ,
+                (1, 125001, [40, 0.75], 'rand_simple' ), (250, 501, [40, 0.75], 'rand_simple' ) ,
+                (1, 125001, [40, 1   ], 'rand_simple' ), (250, 501, [40, 1   ], 'rand_simple' ) ,
+                (1, 125001, [25, 0   ], 'rand_simple' ), (250, 501, [25, 0   ], 'rand_simple' ) ,
+                (1, 125001, [25, 0.25], 'rand_simple' ), (250, 501, [25, 0.25], 'rand_simple' ) ,
+                (1, 125001, [25, 0.5 ], 'rand_simple' ), (250, 501, [25, 0.5 ], 'rand_simple' )  ,
+                (1, 125001, [25, 0.75], 'rand_simple' ), (250, 501, [25, 0.75], 'rand_simple' ) ,
+                                                         (250,1001, [25, 1   ], 'rand_simple' ) , #(1, 125001, [25, 1   ], 'rand_simple' ),  (250, 501, [25, 1   ], 'rand_simple' ) ,
+                (1, 125001, [10, 0   ], 'rand_simple' ), (250, 501, [10, 0   ], 'rand_simple' ) ,
+                (1, 125001, [10, 0.25], 'rand_simple' ), (250, 501, [10, 0.25], 'rand_simple' ) ,
+                (1, 125001, [10, 0.5 ], 'rand_simple' ), (250, 501, [10, 0.5 ], 'rand_simple' )  ,
+                (1, 125001, [10, 0.75], 'rand_simple' ), (250, 501, [10, 0.75], 'rand_simple' ) ,
+                                                         (250,1001, [10, 1   ], 'rand_simple' ) , #(1, 125001, [10, 1   ], 'rand_simple' ),  (250, 501, [10, 1   ], 'rand_simple' )
+                ]
+            self.default_testing_infolist_generate_data  =   [
+                (1, 12501, [40, 0   ], 'rand_simple' ),  (25, 501, [40, 0   ], 'rand_simple' ) ,
+                (1, 12501, [40, 0.25], 'rand_simple' ),  (25, 501, [40, 0.25], 'rand_simple' ) ,
+                (1, 12501, [40, 0.5 ], 'rand_simple' ),  (25, 501, [40, 0.5 ], 'rand_simple' )  ,
+                (1, 12501, [40, 0.75], 'rand_simple' ),  (25, 501, [40, 0.75], 'rand_simple' ) ,
+                (1, 12501, [40, 1   ], 'rand_simple' ),  (25, 501, [40, 1   ], 'rand_simple' ),
+                (1, 12501, [25, 0   ], 'rand_simple' ),  (25, 501, [25, 0   ], 'rand_simple' ) ,
+                (1, 12501, [25, 0.25], 'rand_simple' ),  (25, 501, [25, 0.25], 'rand_simple' ) ,
+                (1, 12501, [25, 0.5 ], 'rand_simple' ),  (25, 501, [25, 0.5 ], 'rand_simple' )  ,
+                (1, 12501, [25, 0.75], 'rand_simple' ),  (25, 501, [25, 0.75], 'rand_simple' ) ,
+                                                         (25,1001, [25, 1   ], 'rand_simple' ) , #(1, 12501, [25, 1   ], 'rand_simple' ),   (25, 501, [25, 1   ], 'rand_simple' ) ,
+                (1, 12501, [10, 0   ], 'rand_simple' ),  (25, 501, [10, 0   ], 'rand_simple' ) ,
+                (1, 12501, [10, 0.25], 'rand_simple' ),  (25, 501, [10, 0.25], 'rand_simple' ) ,
+                (1, 12501, [10, 0.5 ], 'rand_simple' ),  (25, 501, [10, 0.5 ], 'rand_simple' ) ,
+                (1, 12501, [10, 0.75], 'rand_simple' ),  (25, 501, [10, 0.75], 'rand_simple' ) ,
+                                                         (25,1001, [10, 1   ], 'rand_simple' )   #(1, 12501, [10, 1   ], 'rand_simple' ),   (25, 501, [10, 1   ], 'rand_simple' )
+                ]
+        elif  all( item in [0, 0.25, 0.5, 0.75, 1 ] for item in self.list_para )   and self.siva_sys_name =='old_MKS_Lpi32_RK4':
+            self.N = 256
+            self.dt_Output =0.15
+            self.default_training_infolist_generate_data  =  [                ]
+            self.default_testing_infolist_generate_data  =   [                ]
+            warnings.warn( 'CSolverSiva.siva_sys_name ==old_MKS_Lpi32_RK4')
+
         elif self.list_para in [  [0.07] ] and self.siva_sys_name =='MS_1stEuler' and method_default_siva_data_gen==-1: #Paper Revision Change
 
             self.nu_extention_list = [0.07, 0.125, 0.4 , 0.7]
@@ -1116,7 +1397,7 @@ class CSolverSiva:
             ]
 
         else:
-            raise ValueError ('self.list_para')
+            raise ValueError('CSolverSiva.list_para')
 
         self.__print__()
 
@@ -1124,7 +1405,7 @@ class CSolverSiva:
         print( 'siva_sys_name=',self.siva_sys_name)
         print( 'N=',            self.N,  end =" ," )
         print( 'dt_Output=' ,   self.dt_Output,  end =" ," )
-        #if self.siva_sys_name=='MS_1stEuler' or self.siva_sys_name=='MS_RK4':
+
         print( 'self.list_para =',    self.list_para,            end =" ," )
 
         #print( 'nu_extention_list =',    self.nu_extention_list,            end =" ," )
@@ -1172,10 +1453,24 @@ class CSolverSiva:
 
         elif self.siva_sys_name == 'MS_RK4' :
             each_nu = -each_parameter  # negative
-            dsol = libSiva.RK4NumericalSolver_dsol(d0, t_Seq, Lpi=1, mu=0, nu=each_nu, d_ratio=1, n_dt=5)
+            dsol = libSiva.RK4NumericalSolver_dsol(d0, t_Seq, Lpi=1, mu=0, nu=each_nu, d_ratio=1, tau=1, n_dt=5)
         elif self.siva_sys_name == 'KS_RK4' :
             each_Lpi = each_parameter
-            dsol = libSiva.RK4NumericalSolver_dsol(d0, t_Seq, Lpi=each_Lpi, mu=1, nu=1, d_ratio=0, n_dt=1)
+            dsol = libSiva.RK4NumericalSolver_dsol(d0, t_Seq, Lpi=each_Lpi, mu=1, nu=1, d_ratio=0, tau=1, n_dt=1)
+        elif self.siva_sys_name == 'MKS_RK4' :
+            each_Lpi, each_rho = each_parameter
+            d_ratio = each_rho
+            mu,nu, tau = libSiva.Coeff_Lpi_d_to_mu_nu_tau( each_Lpi, d_ratio)
+            dsol = libSiva.RK4NumericalSolver_dsol(d0, t_Seq, Lpi=each_Lpi, mu=mu, nu=nu, d_ratio=d_ratio, tau=tau, n_dt=5)
+
+        elif self.siva_sys_name == 'old_MKS_Lpi32_RK4': # can be deleted later
+            warnings.warn(' self.siva_sys_name == old_MKS_Lpi32_RK4,  this should be deleted later ' )
+            each_rho = each_parameter
+            d_ratio = each_rho * 4
+            Lpi = 32 # old way to force this value
+            mu,nu, tau = libSiva.Coeff_Lpi_d_to_mu_nu_tau( Lpi, d_ratio , max_amplitude = 1)
+            tau = 1 # old way to force this value
+            dsol = libSiva.RK4NumericalSolver_dsol(d0, t_Seq, Lpi=Lpi, mu=mu, nu=nu, d_ratio=d_ratio, tau=tau, n_dt=5)
 
         assert np.any( np.isnan( dsol  ) )==False, "nan in generate_dsol_single"
         return dsol
@@ -1195,10 +1490,9 @@ class CSolverSiva:
 
         actual_infolist_selected_nu = []
 
-
-        for num_traj, len_seq, nu, init_op_string in infolist:
-            if nu in self.list_para:
-                actual_infolist_selected_nu.append( (num_traj, len_seq, nu, init_op_string ) )
+        for num_traj, len_seq, pdepara, init_op_string in infolist:
+            if pdepara in self.list_para:
+                actual_infolist_selected_nu.append( (num_traj, len_seq, pdepara, init_op_string ) )
 
         if len( actual_infolist_selected_nu ) == 0:
             raise ValueError('none of nu has been found: generate_or_load_DEFAULT_dsol_list')
@@ -1229,15 +1523,16 @@ class CSolverSiva:
             # assert idx_nu.size >=0 , 'idx_nu fail in generate_or_load_xsol_list'
 
             #####
-            if 'MS_1stEuler' in self.siva_sys_name:
+            if 'MS_1stEuler' == self.siva_sys_name:
                 pkl_filename_dsol_multraj =    'dsol_multraj' + '{:d}'.format(num_traj) + 'L{:d}'.format(len_seq) + '_nu' + round_num_to_txt(pde_para) + '_N' + '{:d}'.format(self.N) +'_dt' +  round_num_to_txt(self.dt_Output)  + '_'+ init_op_string
                 if abs(self.ActiveNoise_Amplitude) >= 1E-9:   pkl_filename_dsol_multraj +=   '_Noise'
-            elif 'MS_RK4' in self.siva_sys_name:
+            elif 'MS_RK4' == self.siva_sys_name:
                 pkl_filename_dsol_multraj = 'RK4_dsol_multraj' + '{:d}'.format(num_traj) + 'L{:d}'.format(len_seq) + '_nu' + round_num_to_txt(pde_para) + '_N' + '{:d}'.format(self.N) +'_dt' +  round_num_to_txt(self.dt_Output)  + '_'+ init_op_string
                 if abs(self.ActiveNoise_Amplitude) >= 1E-9:   pkl_filename_dsol_multraj +=   '_Noise'
-            elif 'KS' in self.siva_sys_name == 'KS_RK4' :
+            elif 'KS_RK4' == self.siva_sys_name  :
                 pkl_filename_dsol_multraj ='KSRK4_dsol_multraj' + '{:d}'.format(num_traj) + 'L{:d}'.format(len_seq) + '_Lpi' + round_num_to_txt(pde_para) + '_N' + '{:d}'.format(self.N) +'_dt' + round_num_to_txt(self.dt_Output)  + '_'+ init_op_string
-
+            elif 'MKS_RK4' == self.siva_sys_name :
+                pkl_filename_dsol_multraj ='MKS_dsol_multraj' + '{:d}'.format(num_traj) + 'L{:d}'.format(len_seq) + '_Lpi{:d}rho{:g}'.format(pde_para[0], pde_para[1])+ '_N' + '{:d}'.format(self.N) +'_dt' + round_num_to_txt(self.dt_Output)  + '_'+ init_op_string
 
             pkl_filename_dsol_multraj += '.pkl'
             #####
@@ -1259,6 +1554,8 @@ class CSolverSiva:
                     assert pde_para == data_load['nu']
                 elif self.siva_sys_name == 'KS_RK4' :
                     assert pde_para == data_load['Lpi']
+                elif self.siva_sys_name == 'MKS_RK4':
+                    assert pde_para == data_load['Lpi_rho']
                 print('Success: load ' + picklefilename )
 
             else:  # fresh generate data if the pickle file does not exist or bForceRegen==True
@@ -1276,6 +1573,8 @@ class CSolverSiva:
                         data_for_save = {'dsol_multraj':dsol_multraj, 'num_traj':num_traj,'len_seq':len_seq,  'nu':pde_para,    'N':self.N,'dt_Output':self.dt_Output,'init_op_string':init_op_string,'ActiveNoise_Amplitude':self.ActiveNoise_Amplitude,'ActiveNoise_stepfeq':self.ActiveNoise_stepfeq,'k_ActiveNoise':self.k_ActiveNoise}
                     elif self.siva_sys_name == 'KS_RK4' :
                         data_for_save = {'dsol_multraj':dsol_multraj, 'num_traj':num_traj,'len_seq':len_seq,  'Lpi':pde_para,  'N':self.N,'dt_Output':self.dt_Output,'init_op_string':init_op_string}
+                    elif self.siva_sys_name == 'MKS_RK4' :
+                        data_for_save = {'dsol_multraj':dsol_multraj, 'num_traj':num_traj,'len_seq':len_seq, 'Lpi_rho':pde_para,  'N':self.N,'dt_Output':self.dt_Output,'init_op_string':init_op_string}
 
                     open_file = open(picklefilename, "wb")
                     pickle.dump(data_for_save, open_file)

@@ -149,7 +149,7 @@ class my_cfd_DataSet(torch.utils.data.Dataset):
 class Cdata_sys:
     def __init__(self,sys_name='MS_RK4', list_para=[0.025,0.05,0.2], list_cfdfilename=None, method_default_siva_data_gen=1, num_PDEParameters = 1):
 
-        assert( sys_name  in ['MS_1storder', 'MS_RK4',  'KS_RK4', 'cfd'] )
+        assert( sys_name  in ['MS_1storder', 'MS_RK4',  'KS_RK4', 'MKS_RK4', 'cfd'] )
         assert type(list_para)==list
 
         self.sys_name = sys_name
@@ -158,6 +158,7 @@ class Cdata_sys:
         self.method_default_siva_data_gen=method_default_siva_data_gen
         self.num_PDEParameters = num_PDEParameters
 
+        if type( list_para[0] ) is list:    assert( num_PDEParameters == len( list_para[0] )  )
 
 
     def get_num_PDEParameters(self):
@@ -171,7 +172,8 @@ class Cdata_sys:
 
     def para_name( self ):
         if 'MS' in self.sys_name:            return 'nu'
-        elif 'KS' in self.sys_name:          return 'Lpi'
+        elif 'KS_RK4' == self.sys_name:      return 'Lpi'
+        elif 'MKS_RK4' == self.sys_name:     return 'Lpi_rho'
         elif 'cfd' in self.sys_name:         return 'cfdfilename'
         else:                                raise ValueError('para_name')
 
@@ -232,6 +234,7 @@ class lib_Model:
                   #'conv:method_conv':'',
                   'conv:method_BatchNorm':0,
                   'conv:PDEPara_depth': 4,
+                  'conv:PDEPara_PathNum': 1,
                   'conv:method_ParaEmbedding':False
                   #'bExternalConstraint':False
                   #,'yB_1DNormalization':None
@@ -399,6 +402,7 @@ class lib_Model:
                                params['num_PDEParameters'],
                                params['conv:method_BatchNorm'],
                                params['conv:PDEPara_depth'],
+                               params['conv:PDEPara_PathNum'],
                                params['conv:method_ParaEmbedding']
                                #params['bExternalConstraint']
                                #,params['yB_1DNormalization']
@@ -450,11 +454,13 @@ class lib_Model:
                model_name_detail  += 'm' + str(params['fourier:modes_fourier'][0]) + '_' + str(params['fourier:modes_fourier'][1]) + 'w' + str(params['fourier:width'])
 
         if 'MS' in data_sys.sys_name or 'KS' in data_sys.sys_name :
-            #if len(nu_Siva)>0:
             para_str_ = data_sys.para_name()
             for idx, each_para in enumerate( data_sys.list_para):
                 if idx == 0 or idx == len(data_sys.list_para)-1 :
-                    para_str_ +=  round_num_to_txt(each_para) + '_'
+                    if 'MKS_' in data_sys.sys_name: # Now having two parameters
+                        para_str_ +=  "{:d}_{:g}_".format( each_para[0], each_para[1] )
+                    else:
+                        para_str_ +=  round_num_to_txt(each_para) + '_'
             model_name_detail += para_str_[:-1]
 
         elif 'cfd' in data_sys.sys_name :   #len( para_cfdNS) > 0:
@@ -538,7 +544,8 @@ class lib_Model:
             #    model_name_detail += mystr
 
             if params['conv:method_types_conv'] != 'conv_all': model_name_detail += ( '_' + params['conv:method_types_conv'] )
-            if params['conv:method_nonlinear'] != 'all':       model_name_detail += ('_NonLinear' + params['conv:method_nonlinear'])
+            if params['conv:method_nonlinear'] != 'all':       model_name_detail += ('_nonlinear' + params['conv:method_nonlinear'])
+            if params['conv:PDEPara_PathNum'] >1:             model_name_detail += ('_pathnum{}'.format( params['conv:PDEPara_PathNum'] ) )
             if params['conv:method_BatchNorm']==-1:          model_name_detail += '_bn'
             elif params['conv:method_BatchNorm']>0:          model_name_detail += '_ln'
 
@@ -586,15 +593,14 @@ class lib_DataGen:
         t1 = default_timer()
 
         if 'MS' in data_sys.sys_name or 'KS' in data_sys.sys_name:
-        #if any( str_ in data_sys.sys_name for str_ in ['MS','KS'] ):
-            sequence_disp, sequence_disp_test, sequence_nu,sequence_nu_test = \
+            sequence_disp, sequence_disp_test, sequence_para,sequence_para_test = \
                lib_DataGen.DataGen_siva( data_sys, params['T_in'],params['T_out']*params['T_d_out'],nDIM=params['nDIM'],Nx=params['Nx'],
                                          yB_estimate=params['data:yB_estimate'],AspectRatio_set=params['data:AspectRatio_set'],
                                          nStep=params['data:nStep'],nStepSkip=params['data:nStepSkip'],dir_save_training_data=params['data:dir_save_training_data'] ) #,
                                          #method_default_siva_data_gen=data_sys.method_default_siva_data_gen)
 
             train_disp, test_disp, train_PDEpara,test_PDEpara = \
-                lib_DataGen.np_array_To_torch_tensor(sequence_disp, sequence_disp_test,sequence_nu,sequence_nu_test,data_sys,params)
+                lib_DataGen.np_array_To_torch_tensor(sequence_disp, sequence_disp_test,sequence_para,sequence_para_test,data_sys,params)
 
             dataset_train, dataset_test =  torch.utils.data.TensorDataset( train_disp, train_PDEpara, ), torch.utils.data.TensorDataset( test_disp, test_PDEpara, )
 
@@ -620,10 +626,10 @@ class lib_DataGen:
 
 
     @staticmethod
-    def np_array_To_torch_tensor(sequence_disp, sequence_disp_test,sequence_nu,sequence_nu_test,data_sys,params):
+    def np_array_To_torch_tensor(sequence_disp, sequence_disp_test,sequence_para,sequence_para_test,data_sys,params):
 
-        print('sequence_disp.shape, sequence_disp_test.shape,sequence_nu.shape,sequence_nu_test.shape' )
-        print( sequence_disp.shape, sequence_disp_test.shape,sequence_nu.shape,sequence_nu_test.shape)
+        print('sequence_disp.shape, sequence_disp_test.shape,sequence_para.shape,sequence_para_test.shape' )
+        print( sequence_disp.shape, sequence_disp_test.shape,sequence_para.shape,sequence_para_test.shape)
 
         nDIM =  params['nDIM']
         data_channel = params['data_channel']
@@ -633,19 +639,19 @@ class lib_DataGen:
             #(2965, 2048, 11, 3)
             s = sequence_disp.shape
             train_disp = torch.tensor(sequence_disp.reshape(s[0], s[1], s[2] * s[3]), dtype=torch.float)
-            train_PDEpara = torch.tensor(sequence_nu, dtype=torch.float)
+            train_PDEpara = torch.tensor(sequence_para, dtype=torch.float)
 
             s = sequence_disp_test.shape
             test_disp = torch.tensor(sequence_disp_test.reshape(s[0], s[1], s[2] * s[3]), dtype=torch.float)
-            test_PDEpara = torch.tensor(sequence_nu_test, dtype=torch.float)
+            test_PDEpara = torch.tensor(sequence_para_test, dtype=torch.float)
         else:
             sequence_disp       = np.moveaxis(sequence_disp,      1, -1)
             sequence_disp_test  = np.moveaxis(sequence_disp_test, 1, -1)
             #(20000, 128, 21) in 1D ,  or , (20000, 128, 128, 21)  in 2D
             train_disp = torch.repeat_interleave( torch.tensor(sequence_disp,dtype=torch.float), data_channel, dim=-1 )
-            train_PDEpara = torch.tensor(sequence_nu, dtype=torch.float)
+            train_PDEpara = torch.tensor(sequence_para, dtype=torch.float)
             test_disp = torch.repeat_interleave(torch.tensor(sequence_disp_test, dtype=torch.float), data_channel, dim=-1)
-            test_PDEpara = torch.tensor(sequence_nu_test, dtype=torch.float)
+            test_PDEpara = torch.tensor(sequence_para_test, dtype=torch.float)
 
 
         print('train_disp.shape, test_disp.shape, train_PDEpara.shape,test_PDEpara.shape')
@@ -660,13 +666,17 @@ class lib_DataGen:
                       nStep=1, nStepSkip=1,
                       dir_save_training_data = './data/') : #,method_default_siva_data_gen=1):
 
-        if 'MS' in data_sys.sys_name:
-            #if not all( item in [0.01, 0.02, 0.07, 0.125, 0.4, 0.7, 0.025, 0.05, 0.075, 0.1, 0.15 ] for item in data_sys.list_para ) :
-            if not all( item in [0.01, 0.02,  0.07, 0.125, 0.4, 0.7, 0.025, 0.035, 0.05, 0.07,  0.1, 0.15 ] for item in data_sys.list_para ) :
-                raise ValueError('DataGen_Siva, data_sys.list_para did not found for ' + data_sys.para_name() )
-        elif 'KS' in data_sys.sys_name:
-            if not all( item in [6, 9, 12, 18, 24] for item in data_sys.list_para ) :
-                raise ValueError('DataGen_Siva, data_sys.list_para did not found for ' + data_sys.para_name() )
+        ### skip the following check
+        # if 'MS_RK4' == data_sys.sys_name:
+        #     #if not all( item in [0.01, 0.02, 0.07, 0.125, 0.4, 0.7, 0.025, 0.05, 0.075, 0.1, 0.15 ] for item in data_sys.list_para ) :
+        #     if not all( item in [0.01, 0.02,  0.07, 0.125, 0.4, 0.7, 0.025, 0.035, 0.05, 0.07,  0.1, 0.15 ] for item in data_sys.list_para ) :
+        #         raise ValueError('DataGen_Siva, data_sys.list_para did not found for ' + data_sys.para_name() )
+        # elif 'KS_RK4' == data_sys.sys_name:
+        #     if not all( item in [6, 9, 12, 18, 24] for item in data_sys.list_para ) :
+        #         raise ValueError('DataGen_Siva, data_sys.list_para did not found for ' + data_sys.para_name() )
+        # elif 'MKS_RK4' in data_sys.sys_name:
+        #     if not all( item in [0, 0.25, 0.5, 0.75, 1] for item in data_sys.list_para ) :
+        #             raise ValueError('DataGen_Siva, data_sys.list_para did not found for ' + data_sys.para_name() )
 
         #dir_save_training_data = './data/'
 
@@ -680,24 +690,26 @@ class lib_DataGen:
             name_xsol= 'ylevel'
             print( '2D: Ny_actual=', Ny, 'yB=', yB)
 
-        list_xsol, list_nu           = SivaEq.generate_or_load_DEFAULT_xsol_list('train', dir_save_training_data,
+        list_xsol, list_para           = SivaEq.generate_or_load_DEFAULT_xsol_list('train', dir_save_training_data,
                                                                                  name_xsol=name_xsol, Nx=Nx, yB_estimate=yB,AspectRatio_set=AspectRatio_set)
-        list_xsol_test, list_nu_test = SivaEq.generate_or_load_DEFAULT_xsol_list('test' , dir_save_training_data,
+        list_xsol_test, list_para_test = SivaEq.generate_or_load_DEFAULT_xsol_list('test' , dir_save_training_data,
                                                                                  name_xsol=name_xsol, Nx=Nx, yB_estimate=yB,AspectRatio_set=AspectRatio_set)
         #print('SivaEq.generate_or_load_DEFAULT_xsol_list')
 
         #if params['method_TimeAdv'] == 'simple':
         # sequence_disp = libData.Reorg_list_dsol( list_dsol, T_out, T_in )
-        sequence_disp, sequence_nu           = libData.Reorg_list_xsol(list_xsol, list_nu,           T_out, T_in, nStep, nStepSkip, name_xsol=name_xsol)
+        
+        sequence_disp     , sequence_para      = libData.Reorg_list_xsol(list_xsol,      list_para,      T_out, T_in, nStep, nStepSkip, name_xsol=name_xsol)
+        sequence_disp_test, sequence_para_test = libData.Reorg_list_xsol(list_xsol_test, list_para_test, T_out, T_in, nStep, nStepSkip, name_xsol=name_xsol)
+        
         #print('libData.Reorg_list_xsol')
-        sequence_disp_test, sequence_nu_test = libData.Reorg_list_xsol(list_xsol_test, list_nu_test, T_out, T_in, nStep, nStepSkip, name_xsol=name_xsol)
         #print('libData.Reorg_list_xsol')
 
         #else:  # params['method_TimeAdv'] == 'gru':
-        #    #sequence_disp, sequence_nu = libData.Reorg_list_dsol(list_dsol, list_nu, seq_length, T_in)
+        #    #sequence_disp, sequence_para = libData.Reorg_list_dsol(list_dsol, list_para, seq_length, T_in)
         #    raise ValueError('Not implemented')
 
-        return sequence_disp, sequence_disp_test, sequence_nu,sequence_nu_test
+        return sequence_disp, sequence_disp_test, sequence_para,sequence_para_test
 
 
 
@@ -724,12 +736,11 @@ class lib_DataGen:
                 list_p   =  list_para
             
             #
-            sequence_disp, sequence_nu = libcfdData.Reorg_list_y(list_y, list_p, T_out, T_in, nStep, nStepSkip)
+            sequence_disp, sequence_para = libcfdData.Reorg_list_y(list_y, list_p, T_out, T_in, nStep, nStepSkip)
             sequence_disp_test = np.copy(sequence_disp[-1:])
-            sequence_nu_test = np.copy(sequence_nu[-1:])
+            sequence_para_test = np.copy(sequence_para[-1:])
             #
-            #return sequence_disp, sequence_disp_test,sequence_nu,sequence_nu_test
-            dataset_train, dataset_test = torch.utils.data.TensorDataset(sequence_disp, sequence_nu,), torch.utils.data.TensorDataset(sequence_disp_test, sequence_nu_test,)
+            dataset_train, dataset_test = torch.utils.data.TensorDataset(sequence_disp, sequence_para,), torch.utils.data.TensorDataset(sequence_disp_test, sequence_para_test,)
 
             return dataset_train, dataset_test
             
@@ -944,7 +955,6 @@ class lib_ModelTrain:
                     optimizer.zero_grad()
                     # loss.backward()
                     l2_full.backward()
-
                     if params['train:gradient_clip'] is not None:
                         if params['parallel_run']:
                             nn.utils.clip_grad_norm_(model.module.parameters(), params['train:gradient_clip'] )
@@ -952,7 +962,6 @@ class lib_ModelTrain:
                             nn.utils.clip_grad_norm_(model.parameters(), params['train:gradient_clip'] )
 
                     optimizer.step()
-
                     print('', end='.')
 
             if ntest > 10:
@@ -988,7 +997,19 @@ class lib_ModelTrain:
                             # --------------
 
                             test_l2_full += myloss(pred.reshape(current_batch_size, -1),  yy.reshape(current_batch_size, -1)).item()
-                    ################
+
+
+            if params['parallel_run']:
+                # In order to do the sum across devices, the variable needs to be a
+                # tensor with size of at least 1. So it should not be a scalar tensor, if it is
+                # you will need to put it into a 1-d tensor.
+                torch.distributed.barrier()
+                l2__for_print_due_to_ddp = torch.tensor([train_l2_full ,test_l2_full], dtype=torch.float).to(local_rank)
+                # Then, you perform the reduction (SUM in this case) across all devices
+                torch.distributed.all_reduce( l2__for_print_due_to_ddp , op=torch.distributed.ReduceOp.SUM)
+                train_l2_full = l2__for_print_due_to_ddp[0].item()
+                test_l2_full  = l2__for_print_due_to_ddp[1].item()
+
 
             t2 = default_timer()
             scheduler.step()
