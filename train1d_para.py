@@ -17,22 +17,34 @@ def main( parallel_run:int ) :
     #device = torch.device('cuda') # if torch.cuda.is_available() else 'cpu')
     #-----------------------
     nDIM = 1
-    data_sys = Cdata_sys('MS_RK4', list_para=[0.025, 0.035, 0.05, 0.07, 0.1, 0.15], list_cfdfilename=None, num_PDEParameters=1)
+    
+    #data_sys = Cdata_sys('MS_RK4', list_para=[0.025, 0.035, 0.05, 0.07, 0.1, 0.15], list_cfdfilename=None, num_PDEParameters=1)
     #data_sys = Cdata_sys('KS_RK4',[6, 9, 12, 18, 24],  list_cfdfilename=None, num_PDEParameters=1 )
+    
+   
+    list_para=[ [10,0],[10,0.25],[10,0.5], [10,0.75], [10,1],
+                [25,0],[25,0.25],[25,0.5], [25,0.75], [25,1],
+                [40,0],[40,0.25],[40,0.5], [40,0.75], [40,1]  ]
+    #--------------------
+    list_para = [ [10,0],[10,0.25],[10,0.5], [10,0.75], [10,1]  ] 
+    #list_para = [ [40,0],[40,0.25],[40,0.5], [40,0.75], [40,1]  ]
+
+    data_sys = Cdata_sys('MKS_RK4',list_para, num_PDEParameters=2  )
+    
     params = lib_Model.set_default_params(data_sys,nDIM)
 
     params['T_in' ] = 1
     params['T_out'] = 20
-    params['data_channel'] = 1
-    params['data:nStep']  = 1
-    params['data:nStepSkip']=1
-    params['Nx']            = 256 #512 # 128
+    params['data_channel']  = 1
+    params['data:nStep']    = 1
+    params['data:nStepSkip']= 1
+    params['Nx']            = 256 
     #-----
     params['train:batch_size'] = 1000
     params['train:learning_rate'] = 0.0025
     
     #--------------------
-    # model_name = 'fno'   #'fourier2'
+    #model_name = 'fno' 
 
     model_name = 'conv'
     
@@ -42,18 +54,25 @@ def main( parallel_run:int ) :
         params['fourier:modes_fourier' ] =  128  # 64 # 128 # 128 # 64
         params['fourier:width' ] =  30           # 25 # 20
         params['fourier:depth' ] =  4
-        params['fourier:method_WeightSharing'] =  True #
+        params['fourier:method_WeightSharing']  = True #
         params['fourier:method_SkipConnection'] = False
-        params['fourier:method_ParaEmbedding'] = False # True #  3 # False # 2 #False # 2 or True
-        params['fourier:PDEPara_mode_level'] =   [7] #   [3,5]# [7]      #[2,5] # 7 # 5 # None # 5
+        params['fourier:method_ParaEmbedding']  = True # True #  3 # False # 2 #False # 2 or True
+        params['fourier:PDEPara_mode_level']    = [5] # [7] #   [3,5]# [7]      #[2,5] # 7 # 5 # None # 5
         params['PDEPara_fc_class'] = 'OM'
+        
         # params['fourier:method_SteadySolution'] =  True
+    
     elif 'conv' == model_name:
+
         params['conv:method_types_conv'] = 'inception_less'
-        params['conv:en1_channels' ] = [ [16],[32,32],[64,64],[128],[128],[64],[32]] # [ [16],[32,32],[64,64],[128],[128],[64],[32]]
-        params['conv:PDEPara_depth'] = 4                                                # 4
+        params['conv:en1_channels' ] = [ [16,32],[32,32],[64,64],[128],[128],[64],[32]] # [ [16],[32,32],[64,64],[128],[128],[64],[32]]
+        params['conv:PDEPara_depth'] = 6                                                # 4
         params['conv:method_BatchNorm' ] = 256
         params['conv:method_ParaEmbedding']= False # True
+        params['conv:method_nonlinear' ] = 'all_delay'
+        params['conv:PDEPara_PathNum' ] = 1
+
+
     #-----------------
     #----------------------
     # params['PDEPara_OutValueRange']=0.3
@@ -61,9 +80,11 @@ def main( parallel_run:int ) :
     # params['train:epochs'] = 1000
     # params['train:checkpoint_resume'] = '_best.pt' # None     # '_best.pt'
     #----------------------
-    params['train:gradient_clip'] = 50
+    
+    params['train:gradient_clip'] = 30
     params['tensorboard_logdir_prefix'] = ''           # 'paraR_'
-    params['model_name_prefix'] = ''                   # 'test'
+    params['model_name_prefix'] ='corr_' # 'fcD50or1_'                   # 'test'
+    
     #-----------------------
     params['fourier:option_RealVersion'] = False
 
@@ -97,7 +118,7 @@ def main( parallel_run:int ) :
 
 
     #--------------------
-    params['train:batch_size'] =800
+    params['train:batch_size'] =1000
    
 
     # print( 'params=', params )
