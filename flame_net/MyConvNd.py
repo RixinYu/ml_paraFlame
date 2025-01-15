@@ -191,7 +191,8 @@ def my_NormNd(nDIM, out_channel, bNorm):
     elif nDIM == 2:
         if bNorm == -1:   return nn.BatchNorm2d(out_channel)
         else:
-            return nn.LayerNorm( [out_channel, bNorm[0], bNorm[1] ] )
+            return nn.LayerNorm( [out_channel, bNorm, bNorm ] )
+            #return nn.LayerNorm( [out_channel, bNorm[0], bNorm[1] ] )
 
     raise ValueError('my_NormNd: nDIM={}, out_channel={}, bNorm={}', nDIM, out_channel,bNorm)
 #

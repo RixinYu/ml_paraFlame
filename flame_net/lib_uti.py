@@ -43,6 +43,10 @@ from flame_net.PFNO_Nd import PFNO_Nd, p_rescale_nu
 
 from flame_net.ConvPDE_Nd import ConvPDE_Nd
 
+from flame_net.kFNO_Nd import kFNO_Nd
+from flame_net.kConv_Nd import kConv_Nd
+
+from flame_net.tFNO_Nd import tFNO_Nd
 #################################################
 #
 # lib Utilities
@@ -62,7 +66,11 @@ def tensorboard_fig2d_monitor(va_Pair_pick, vaPDEPara_Pair_pick, model, device ,
         #if nDIM == 2:    va_pred = torch.tanh(va_pred)
 
     for ax, pred in zip( axs, va_pred[...,-1:]) :
-        ax.imshow(pred.squeeze())
+        if pred.shape[-1]> nOutputStep:
+            ax.imshow(pred[...,0].squeeze())
+        else:
+            ax.imshow(pred.squeeze())
+
     fig.tight_layout()
     return fig
 
@@ -87,7 +95,11 @@ def tensorboard_fig1d_monitor( va_Pair_pick, vaPDEPara_Pair_pick, model, device,
         #axs[i].plot( va_pred[i,:,0] - va_Pair_pick[i,:,0], 'r-' )
 
         ax.plot( va_Pair_pick[i,:,nInputStep]-va_Pair_pick[i,:,nInputStep-1], line1color[i]+'--')
-        ax.plot( va_pred[i,:,0]             - va_Pair_pick[i,:,nInputStep-1], line2color[i]+'-' )
+
+        if va_pred.shape[-1] > nOutputStep:
+            ax.plot( va_pred[i,:,0,0]             - va_Pair_pick[i,:,nInputStep-1], line2color[i]+'-' )
+        else:
+            ax.plot( va_pred[i,:,0]             - va_Pair_pick[i,:,nInputStep-1], line2color[i]+'-' )
     # else:
     #     i = 0
     #     #axs.plot( va_Pair_pick[i,:,1]/20 , 'c')
@@ -158,7 +170,7 @@ class Cdata_sys:
         self.method_default_siva_data_gen=method_default_siva_data_gen
         self.num_PDEParameters = num_PDEParameters
 
-        if type( list_para[0] ) is list:    assert( num_PDEParameters == len( list_para[0] )  )
+        #if type( list_para[0] ) is list:    assert( num_PDEParameters == len( list_para[0] )  )
 
 
     def get_num_PDEParameters(self):
@@ -190,7 +202,6 @@ class lib_Model:
     def set_default_params( data_sys, nDIM ):
 
         assert type(data_sys) == Cdata_sys
-
         params = {'model_name_prefix':'',
                   'data_channel': 1,
                   'method_TimeAdv':'simple',
@@ -205,15 +216,18 @@ class lib_Model:
                   'fourier:brelu_last': 1,
                   'fourier:method_BatchNorm': 0,
                   'fourier:PDEPara_mode_level': None,  # could also be 3, [3,6]
+                  'fourier:basis_type':'',
                   'PDEPara_fc_class':'',
                   'PDEPara_ReScaling': None,
                   'fourier:method_ParaEmbedding':True,
                   'fourier:PDEPara_AcrossDepth':True,
                   'PDEPara_OutValueRange':0.2,
-                  'fourier:method_SteadySolution':False,
                   'fourier:option_RealVersion':False,
                   'Use_2d_DCT':False,
-                  'option_nOutputStep':1,
+                  'fourier:linearKoopmanAdv': False, # may be removed later since it is override when params['fourier:depth_conv']['ftAdv'] == 1
+                  'FourierTimeDIM': False,
+                  'fourier:reversible': False,
+                  'fourier:depth_conv': {'tAdv': 2, 'lift': 3, 'proj': 1, 'rev': 2},
                   'onet:type_branch':'conv',
                   'onet:P': 30,
                   'onet:fc_layers_branch':[100,100,100,100],
@@ -227,7 +241,6 @@ class lib_Model:
                   'conv:out_channel':1,
                   'conv:method_nonlinear':'all',
                   'conv:method_types_conv':'conv_all',
-                  #'conv:method_OP':'',
                   'conv:method_skip':'full',
                   'conv:bUpSampleOrConvTranspose':'upsample',
                   'conv:method_pool':'Max',
@@ -236,14 +249,12 @@ class lib_Model:
                   'conv:PDEPara_depth': 4,
                   'conv:PDEPara_PathNum': 1,
                   'conv:method_ParaEmbedding':False
-                  #'bExternalConstraint':False
-                  #,'yB_1DNormalization':None
         }
 
         #---------------------------------------
         params['T_in'] = 1
         params['T_out'] =20
-        params['T_d_out'] =1
+        params['kTimeStepping'] = 0  # default
         params['num_PDEParameters'] = data_sys.get_num_PDEParameters()
 
         params['nDIM']=nDIM
@@ -266,9 +277,10 @@ class lib_Model:
         params['train:scheduler_step'] = 100
         params['train:scheduler_gamma'] = 0.5
         params['train:epochs'] = 1000
-        params['train:epochs_per_save'] = 100
+        params['train:epochs_per_save'] = [100,200,300,400,500,600,700,800,900]
         params['optimizer_method']=torch.optim.Adam
         params['train:gradient_clip'] = None
+        params['Trainloss'] ='std'  # or 'koop'
         #if nDIM == 1:
             #params['yB_1DNormalization'] =  np.array([-0.7,1.3])*np.pi
 
@@ -298,7 +310,36 @@ class lib_Model:
 
     @staticmethod
     def build_model(model_name_detail,params):
-        if 'fno' in model_name_detail.casefold():
+
+        if 'tFNO' in model_name_detail:
+            basis_type = 'dct[1]'+params['fourier:basis_type'] if params['nDIM']==2 and params['Use_2d_DCT']==True else params['fourier:basis_type']
+            model = tFNO_Nd( params['nDIM'], params['fourier:modes_fourier'],  params['fourier:width'],
+                             bReversible_Uplift_Downproj=params['fourier:reversible'],
+                             FourierTimeDIM=params['FourierTimeDIM'],
+                             in_channel=params['T_in'], kTimeStepping=params['kTimeStepping'],
+                             depth_conv=params['fourier:depth_conv'] , #default: {'tAdv': 2, 'lift': 3, 'proj': 1, 'rev': 2},
+                             method_SkipConnection=params['fourier:method_SkipConnection'], 
+                             method_WeightSharing=params['fourier:method_WeightSharing'], 
+                             basis_type=basis_type,
+                             option_RealVersion=params['fourier:option_RealVersion'],
+                            ).cuda()
+
+        elif 'kFNO' in model_name_detail:
+
+            basis_type = 'dct[1]'+params['fourier:basis_type'] if params['nDIM']==2 and params['Use_2d_DCT']==True else params['fourier:basis_type']
+
+            model = kFNO_Nd( params['nDIM'], params['fourier:modes_fourier'],   params['fourier:width'],
+                             params['fourier:linearKoopmanAdv'],  params['FourierTimeDIM'],
+                             params['T_in'], params['kTimeStepping'], params['fourier:method_WeightSharing'], params['fourier:method_SkipConnection'],
+                             params['fourier:option_RealVersion'],
+                             params['method_outputTanh'],
+                             basis_type, params['fourier:depth']).cuda()
+        elif 'kConv' in model_name_detail:
+            model = kConv_Nd(  params['nDIM'], params['Nx'], params['T_in'],params['kTimeStepping'],
+                               params['conv:en1_channels'], params['conv:de1_channels'],
+                               params['conv:method_types_conv'],
+                               params['conv:method_BatchNorm'],params['method_outputTanh'] ).cuda()
+        elif 'FNO' in model_name_detail:
             model = PFNO_Nd( params['nDIM'],
                              params['fourier:modes_fourier'],
                              params['fourier:width'],  #   params['method_TimeAdv'],
@@ -318,75 +359,8 @@ class lib_Model:
                              params['fourier:method_ParaEmbedding'] ,
                              params['fourier:option_RealVersion'],
                              params['method_outputTanh'],
-                             params['option_nOutputStep'],
-                             params['fourier:method_SteadySolution'],
                              params['Use_2d_DCT'] ).cuda()
-        # elif 'fourier2' in model_name_detail.casefold():
-        #     model = FourierOp2_Nd(params['nDIM'],
-        #                          params['fourier:modes_fourier'],
-        #                          params['fourier:width'],
-        #                          params['method_TimeAdv'],
-        #                          params['T_in'],
-        #                          params['fourier:depth'],
-        #                          params['num_PDEParameters'],
-        #                          params['data_channel'],
-        #                          params['fourier:method_Attention'],
-        #                          params['fourier:method_WeightSharing'],
-        #                          params['fourier:method_SkipConnection'],
-        #                          params['fourier:method_BatchNorm'],
-        #                          params['fourier:brelu_last'] ).cuda()
-        # elif 'fourier' in model_name_detail.casefold():
-        #     if 'lift' in model_name_detail.casefold():
-        #         model = FourierLiftOp_Nd(params['nDIM'],
-        #                              params['fourier:modes_fourier'],
-        #                              params['fourier:width'],
-        #                              params['method_TimeAdv'],
-        #                              params['T_in'],
-        #                              params['fourier:depth'],
-        #                              params['num_PDEParameters'],
-        #                              params['data_channel'],
-        #                              params['fourier:method_Attention'],
-        #                              params['fourier:method_WeightSharing'],
-        #                              params['fourier:method_SkipConnection'],
-        #                              params['fourier:method_BatchNorm'],
-        #                              params['fourier:brelu_last']    ).cuda()
-        #     else:
-        #         model = FourierOp_Nd(params['nDIM'],
-        #                              params['fourier:modes_fourier'],
-        #                              params['fourier:width'],
-        #                              params['method_TimeAdv'],
-        #                              params['T_in'],
-        #                              params['fourier:depth'],
-        #                              params['num_PDEParameters'],
-        #                              params['data_channel'],
-        #                              params['fourier:method_Attention'],
-        #                              params['fourier:method_WeightSharing'],
-        #                              params['fourier:method_SkipConnection'],
-        #                              params['fourier:method_BatchNorm'],
-        #                              params['fourier:brelu_last'],
-        #                              params['fourier:PDEPara_mode_level'] ,
-        #                              params['fourier:PDEPara_AcrossDepth'] ).cuda()
-        # elif 'onet' in model_name_detail.casefold():
-        #     assert params['nDIM']==1
-        #     model = DeepONet_1d(params['Nx'],
-        #                         params['onet:type_branch'],
-        #                         params['data_channel'],
-        #                         params['onet:P'],
-        #                         params['onet:trunk_featurepair'],
-        #                         params['onet:type_trunk'],
-        #                         params['num_PDEParameters'],
-        #                         params['onet:method_nonlinear_act'],
-        #                         params['onet:method_skipconnection'],
-        #                         params['T_in']-1,
-        #                         params['train:data_norm_rms'],
-        #                         params['onet:fc_layers_branch'],
-        #                         params['onet:fc_layers_trunk']
-        #                         #,params['yB_1DNormalization']
-        #                         ).cuda()
-
-
-        elif 'conv' in model_name_detail.casefold():
-
+        elif 'Conv' in model_name_detail:
             model = ConvPDE_Nd(params['nDIM'],params['Nx'],
                                params['data_channel'],
                                params['conv:out_channel'],
@@ -404,8 +378,6 @@ class lib_Model:
                                params['conv:PDEPara_depth'],
                                params['conv:PDEPara_PathNum'],
                                params['conv:method_ParaEmbedding']
-                               #params['bExternalConstraint']
-                               #,params['yB_1DNormalization']
                                ).cuda()
 
         print('count_learnable_params=', str( count_learnable_params(model) ) )
@@ -416,42 +388,45 @@ class lib_Model:
 
         model_name_detail = params['model_name_prefix']
 
-        if params['num_PDEParameters']==1:             model_name_detail += 'p'
+        if   params['num_PDEParameters']==1:           model_name_detail += 'p'
         elif params['num_PDEParameters']==2:           model_name_detail += 'p2'
 
-        if 'onet' in model_name.casefold():
-            model_name_detail += 'ONet'
-        elif 'conv' in model_name.casefold():
-            model_name_detail += 'Conv'
-        elif 'fno' in model_name.casefold():
-            model_name_detail += 'FNO'
-        # elif 'fourier' in model_name.casefold():
-        #     if 'fourier2' in model_name.casefold():
-        #         model_name_detail += 'Fourier2'
-        #     elif 'lift' in model_name.casefold():
-        #         model_name_detail += 'FourierLift'
-        #     else:
-        #         model_name_detail += 'Fourier'
+        if 'onet' in model_name.casefold():           model_name_detail +=  'ONet'
+        elif 'tfno' in model_name.casefold():         model_name_detail += 'tFNO'
+        elif 'kconv' in model_name.casefold():        model_name_detail += 'kConv'
+        elif 'conv' in model_name.casefold():         model_name_detail +=  'Conv'
+        elif 'kfno' in model_name.casefold():         model_name_detail += 'kFNO'
+        elif 'fno' in model_name.casefold():          model_name_detail +=  'FNO'
 
+        #--------------
         nDIM = params['nDIM']
         if nDIM == 1:
             model_name_detail += '_'
         elif nDIM ==2:
             model_name_detail += '2D_'
-            if params['Use_2d_DCT'] == True:
-                model_name_detail += 'dct_'
+            if   params['Nx'] == 512:               model_name_detail += 'Nx512_'
+            elif params['Nx'] == 128:               model_name_detail += 'Nx128_'
 
-        if params['method_outputTanh'] is not None:
-            model_name_detail += 'tanh_'
+            if params['Use_2d_DCT'] == True:        model_name_detail += 'dct_'
+            if params['data:AspectRatio_set'] != 1: model_name_detail += 'aspR{:.1f}_'.format( params['data:AspectRatio_set'] )  
+                
+        #--------------
+
+        if params['method_outputTanh'] is not None:     model_name_detail += 'tanh_'
 
         if params['data:ThicknessScale'] != 1:
             model_name_detail += 'tks{}_'.format ( params['data:ThicknessScale'] )
 
-        if 'fourier' in model_name.casefold() or 'fno' in model_name.casefold() :
-            if nDIM ==1:
-               model_name_detail  += 'm'+ str( params['fourier:modes_fourier'] )+'w'+str( params['fourier:width'])
+        if  'fno' in model_name.casefold() :  # 'fourier' in model_name.casefold() or
+            #---------------------
+            if   nDIM ==1:
+                if  type( params['fourier:modes_fourier'] ) is list:    model_name_detail  += 'm'+ str( params['fourier:modes_fourier'][0] )+'w'+str( params['fourier:width'])
+                else:                                                   model_name_detail  += 'm'+ str( params['fourier:modes_fourier'] )+'w'+str( params['fourier:width'])
             elif nDIM ==2:
-               model_name_detail  += 'm' + str(params['fourier:modes_fourier'][0]) + '_' + str(params['fourier:modes_fourier'][1]) + 'w' + str(params['fourier:width'])
+                model_name_detail  += 'm' + str(params['fourier:modes_fourier'][0]) + '_' + str(params['fourier:modes_fourier'][1]) + 'w' + str(params['fourier:width'])
+            #---------------------
+            model_name_detail += params['fourier:basis_type']
+
 
         if 'MS' in data_sys.sys_name or 'KS' in data_sys.sys_name :
             para_str_ = data_sys.para_name()
@@ -470,25 +445,18 @@ class lib_Model:
                    cfdstr_ += filename + '_'
             model_name_detail += cfdstr_[:-1]
 
-
-        if params['method_TimeAdv']=='gru':    model_name_detail +=  '_gru'
         if params['T_in'] >=2:                 model_name_detail +=  '_Tin' + str(params['T_in'])
         if params['data:nStep'] >=2:           model_name_detail +=  '_nStep' + str(params['data:nStep'])
 
         #if params['num_PDEParameters']>=1:     model_name_detail +=  '_nPara'+ str(params['num_PDEParameters'])
 
-
+        #------------------------------------------------
         if params['num_PDEParameters']>=1:
-
             if 'conv' in model_name.casefold():
                 if params['conv:PDEPara_depth'] is not None:
                     if params['conv:method_ParaEmbedding'] > 0:
                         model_name_detail += 'E'
                 model_name_detail += 'd{}'.format( params['conv:PDEPara_depth'] )
-
-            # elif 'fourier' in model_name.casefold() and 'fourier2' not in model_name.casefold()               :
-            #     if params['fourier:PDEPara_AcrossDepth']:   model_name_detail += 'D{}'.format( params['fourier:PDEPara_mode_level'] )
-            #     else:                                       model_name_detail += 'd{}'.format( params['fourier:PDEPara_mode_level'] )
 
             elif 'fno' in model_name.casefold():
                 if params['fourier:PDEPara_mode_level'] is not None:
@@ -510,23 +478,54 @@ class lib_Model:
 
                     #if params['fourier:method_ParaEmbedding']==False:    model_name_detail += 'D{}'.format( params['fourier:PDEPara_mode_level'] )
                     #else:                                                model_name_detail += 'ED{}'.format( params['fourier:PDEPara_mode_level'] )
+        #------------------------------------------------
 
         if params['data_channel']>=2:          model_name_detail += '_dchan'+ str(params['data_channel'])
 
-        if 'fourier' in model_name.casefold() or 'fno' in model_name.casefold() :
-            if params['fourier:method_Attention']==1:      model_name_detail +=  '_att'
+        #---------
+        if 'tfno' in model_name.casefold():
+            
+            if params['fourier:reversible'] == True: 
+                model_name_detail += '_Rev'
+                if params['fourier:depth_conv']['rev']  != 2: 
+                    model_name_detail += 'D'+str( params['fourier:depth_conv']['rev'])
+            else: 
+                if  params['FourierTimeDIM'] == True:           
+                    model_name_detail +=  '_Ftime'
+
+                if params['fourier:depth_conv']['tAdv'] != 2: 
+                    model_name_detail +=  '_tAdvD'+ str( params['fourier:depth_conv']['tAdv'] )
+                if params['fourier:depth_conv']['lift'] != 3: 
+                    model_name_detail +=  '_liftD'+ str( params['fourier:depth_conv']['lift'] )
+                if params['fourier:depth_conv']['proj'] != 1: 
+                    model_name_detail +=  '_projD'+ str( params['fourier:depth_conv']['proj'] )
+
             if params['fourier:method_WeightSharing']==1:  model_name_detail +=  '_share'
-            if params['fourier:method_WeightSharing']==2:  model_name_detail +=  '_share2'
+
+            if   params['fourier:method_SkipConnection']==0:    model_name_detail +=  '_noskip'
+            elif params['fourier:method_SkipConnection']==-1:   model_name_detail +=  '_nohighskip'
+
+        elif 'kfno' in model_name.casefold():
+            if params['fourier:linearKoopmanAdv'] == True: model_name_detail +=  '_linearkoop'
+            if params['FourierTimeDIM'] == True:           model_name_detail +=  '_Ftime'
+            if params['fourier:method_WeightSharing']==1:  model_name_detail +=  '_share'
+            if params['fourier:method_SkipConnection']==0: model_name_detail +=  '_noskip'
+        elif 'fno' in model_name.casefold() : # 'fourier' in model_name.casefold()
+            if params['fourier:method_Attention']==1:      model_name_detail +=  '_att'
+            if   params['fourier:method_WeightSharing']==1:  model_name_detail +=  '_share'
+            elif params['fourier:method_WeightSharing']==2:  model_name_detail +=  '_share2'
             if params['fourier:method_SkipConnection']==1: model_name_detail +=  '_skip'
 
             if   params['fourier:method_BatchNorm']< 0:   model_name_detail +=  '_bn'
             elif params['fourier:method_BatchNorm']> 0 :   model_name_detail +=  '_ln'
-
             if params['fourier:brelu_last']==0:            model_name_detail += '_noLastRelu'
 
-            if params['fourier:method_SteadySolution']==True:   model_name_detail +=  '_SS'
+        elif 'kconv' in model_name.casefold():
+            if params['conv:method_BatchNorm']==-1:          model_name_detail += '_bn'
+            elif params['conv:method_BatchNorm']>0:          model_name_detail += '_ln'
 
         elif 'conv' in model_name.casefold():
+
             if params['conv:method_skip'] != 'full':                 model_name_detail += '_skip'+ params['conv:method_skip']
             #if  params['conv:en1_channels'] != [ [16],[32,32],[64,64],[128],[128],[64],[32] ] :
             #    mystr = 'e'
@@ -549,31 +548,13 @@ class lib_Model:
             if params['conv:method_BatchNorm']==-1:          model_name_detail += '_bn'
             elif params['conv:method_BatchNorm']>0:          model_name_detail += '_ln'
 
-        # elif 'onet' in model_name.casefold():
-        #     model_name_detail += '_branch' + params['onet:type_branch']
-        #     #if params['onet:type_branch'] !='conv':
-        #     #    model_name_detail += '_branchfc'
-        #     if params['onet:fc_layers_branch'] != [100,100,100,100]:
-        #         model_name_detail +='Br'+''.join( [str(e)+'_' for e in params['onet:fc_layers_branch']  ]  )
-        #     if params['onet:fc_layers_trunk'] != [100,100,100,100]:
-        #         model_name_detail +='Tr'+''.join( [str(e)+'_' for e in params['onet:fc_layers_trunk']  ]  )
-        #
-        #     if params['onet:P'] != 30:
-        #         model_name_detail += '_P'+str(params['onet:P'])
-        #
-        #     if params['onet:trunk_featurepair'] !=1:
-        #         model_name_detail += '_feature' + str(params['onet:trunk_featurepair'])
-        #
-        #     if params['onet:type_trunk'] != 'simple':
-        #         model_name_detail += '_trunkfancy'
-        #
-        #     if params['onet:method_skipconnection'] :
-        #         model_name_detail += '_skipconn'
-        #     if params['train:data_norm_rms'] != 1 :
-        #         model_name_detail += '_Norm'
+        #---------------------
 
-        if params['option_nOutputStep'] > 1:      model_name_detail += '_O{}'.format(params['T_out'])
-        elif params['option_nOutputStep']==1:     model_name_detail += '_o{}'.format(params['T_out'])
+        # if params['option_nOutputStep'] > 1:      model_name_detail += '_O{}'.format(params['T_out'])
+        # elif params['option_nOutputStep']==1:
+        model_name_detail += '_o{}'.format(params['T_out'])
+        if 'kfno' in model_name.casefold() or 'kconv' in model_name.casefold() or 'tfno' in model_name.casefold():
+           if params['kTimeStepping'] != params['T_out']:  model_name_detail += '_k{}'.format(params['kTimeStepping'])
 
         print(model_name_detail)
 
@@ -592,9 +573,69 @@ class lib_DataGen:
         lib_DataGen.print_help()
         t1 = default_timer()
 
-        if 'MS' in data_sys.sys_name or 'KS' in data_sys.sys_name:
+        if 'MKS' in data_sys.sys_name and params['nDIM']==2 : 
+            # ----this pierce of code is to load  the 2D MKS data generated by marco herbert
+            #ParentDir='/mimer/NOBACKUP/groups/ml_flame_storage/ml_2dflame/database128'
+            N     = params['Nx']
+            TimeFact=280
+
+            Lpi, rho = data_sys.list_para[0]
+            beta     = format(Lpi, '03')
+            dRat     =(format(rho, '.2f'))
+
+            if Lpi==25 and rho==1:      ParentDir="../ml_2dflame_extra/database{:g}".format(N)    
+            else:                       ParentDir="../ml_2dflame/database{:g}".format(N)
+
+            T_out = params['T_out']
+
+            fullpath=(ParentDir+'/'+'beta'+beta+'/'+'dRat'+dRat)
+
+
+            # load the training data and chop up the simulation into the required format
+            Sims=45
+            SimsTest=5
+
+            #AAA=np.zeros( (N,N,(T_out+1) ) , dtype=np.float32 )
+            #load_a=np.zeros(((Sims+SimsTest)*TimeFact, N,N,T_out+1),dtype=np.float32)
+            PhiHatSols_all=np.zeros(( (Sims+SimsTest),8000,N,N),dtype=np.float32)
+            for n in range(Sims+SimsTest):       
+                counter=format(n, '02')
+                filename='Run'+counter+'.npy'
+                file=fullpath+'/'+filename
+                print( file )
+                PhiHatSols_all[n,:,:,:] =np.load(file)
+
+
+            # load_a.shape == (50, 280, 128, 128, 21)
+            load_a = np.moveaxis( PhiHatSols_all[:,:TimeFact*(T_out+1),:,:].reshape( ( Sims+SimsTest,TimeFact,T_out+1,N,N) ), 2,-1 ) 
+
+            # load_a.shape == ( ( ., 128, 128, 21) )
+            train_a = load_a[ :Sims , :, :,:,:].reshape( (-1,N,N,T_out+1) )
+            test_a  = load_a[ Sims:  ,:, :,:,:].reshape( (-1,N,N,T_out+1) )
+            #--------------
+            # k=0
+            # for n in range(Sims+SimsTest):       
+            #     counter=format(n, '02')
+            #     filename='Run'+counter+'.npy'
+            #     file=fullpath+'/'+filename
+            #     print('loading...   ', file )
+            #     PhiHatSols=np.load(file)
+            #     for i in range(TimeFact):
+            #         for j in range(T_out+1):
+            #             AAA[:,:,j]=(PhiHatSols[(i)*(T_out+1)+j,:,:])
+            #             load_a[k*TimeFact+i,:,:,:]=AAA #  AAA[::ratio,::ratio,:]
+            #     k=k+1 
+            #-----------------
+            # train_a = load_a[ :Sims*TimeFact    , : , : ]
+            # test_a  = load_a[  (Sims*TimeFact): , : , : ]
+            # #----------------
+            dataset_train=  torch.utils.data.TensorDataset( torch.from_numpy(train_a), torch.zeros(train_a.shape[0]) , )
+            dataset_test =  torch.utils.data.TensorDataset( torch.from_numpy(test_a), torch.zeros(test_a.shape[0]) , )
+
+
+        elif 'MS' in data_sys.sys_name or 'KS' in data_sys.sys_name:
             sequence_disp, sequence_disp_test, sequence_para,sequence_para_test = \
-               lib_DataGen.DataGen_siva( data_sys, params['T_in'],params['T_out']*params['T_d_out'],nDIM=params['nDIM'],Nx=params['Nx'],
+               lib_DataGen.DataGen_siva( data_sys, params['T_in'],params['T_out'],nDIM=params['nDIM'],Nx=params['Nx'],
                                          yB_estimate=params['data:yB_estimate'],AspectRatio_set=params['data:AspectRatio_set'],
                                          nStep=params['data:nStep'],nStepSkip=params['data:nStepSkip'],dir_save_training_data=params['data:dir_save_training_data'] ) #,
                                          #method_default_siva_data_gen=data_sys.method_default_siva_data_gen)
@@ -769,10 +810,13 @@ class lib_DataGen:
 
 
 
+def tanh_to_entropy(tanh_y):
+    p = (tanh_y + 1 )/2 *0.99 + 0.005
+    return -1*( p*torch.log2(p) + (1-p)*torch.log2(1-p) ) 
 
 #loss function with rel/abs Lp loss
 class LpLoss(object):
-    def __init__(self, d=2, p=2, size_average=True, reduction=True):
+    def __init__(self, d=2, p=2, size_average=True, reduction=True , tanh_loss=False ):
         super(LpLoss, self).__init__()
         #Dimension and Lp-norm type are postive
         assert d > 0 and p > 0
@@ -780,28 +824,35 @@ class LpLoss(object):
         self.p = p
         self.reduction = reduction
         self.size_average = size_average
+        
+        self.tanh_loss = tanh_loss  # if True, then the input is tanh(y) 
 
-    def abs(self, x, y, c = 1 ):
+
+    # def abs(self, x, y, c = 1 ):
+    #     num_examples = x.size()[0]
+
+    #     #Assume uniform mesh
+    #     h = 1.0 / (x.size()[1] - 1.0)
+
+    #     all_norms = (h**(self.d/self.p))*torch.norm(x.view(num_examples,-1) - y.view(num_examples,-1), self.p, 1)
+
+    #     if self.reduction:
+    #         if self.size_average:
+    #             return torch.mean(all_norms * c)
+    #         else:
+    #             return torch.sum(all_norms * c)
+
+    #     return all_norms
+
+    def rel(self, x, y, c=1 ):
         num_examples = x.size()[0]
 
-        #Assume uniform mesh
-        h = 1.0 / (x.size()[1] - 1.0)
+        if self.tanh_loss:
+            diff_norms = torch.norm( ((x-y)/tanh_to_entropy(y)).reshape(num_examples,-1), self.p, 1)    
+        else:
+            diff_norms = torch.norm( x.reshape(num_examples,-1) - y.reshape(num_examples,-1), self.p, 1)
 
-        all_norms = (h**(self.d/self.p))*torch.norm(x.view(num_examples,-1) - y.view(num_examples,-1), self.p, 1)
-
-        if self.reduction:
-            if self.size_average:
-                return torch.mean(all_norms * c)
-            else:
-                return torch.sum(all_norms * c)
-
-        return all_norms
-
-    def rel(self, x, y , c = 1):
-        num_examples = x.size()[0]
-
-        diff_norms = torch.norm(x.reshape(num_examples,-1) - y.reshape(num_examples,-1), self.p, 1)
-        y_norms   = torch.norm(y.reshape(num_examples,-1),                               self.p, 1)
+        y_norms   = torch.norm( y.reshape(num_examples,-1),                               self.p, 1)
 
         if self.reduction:
             if self.size_average:
@@ -816,24 +867,30 @@ class LpLoss(object):
 
 
 
+
+
+
 class lib_ModelTrain:
     @staticmethod
     def Train(dataset_train, dataset_test,   #train_disp, test_disp,train_PDEpara,test_PDEpara,
               model, model_name_detail, params ):
-
+        # --------------------
+        params['TrainLoss'] = 'koop' if params['kTimeStepping'] > 1 and params['kTimeStepping']==params['T_out'] else 'std'
+        #--------------------
         print('batch_size=', params['train:batch_size'])
         #-------------
         nDIM         = params['nDIM']
         data_channel = params['data_channel']
         T_in         = params['T_in']
         T_out        = params['T_out']
-        T_d_out      = params['T_d_out']
-        #-------------
-        if params['option_nOutputStep']>1:  assert T_out == params['option_nOutputStep']
         #----------------------------------------------------------------------------------------
         optimizer = params['optimizer_method']( model.parameters(), lr=params['train:learning_rate'], weight_decay=params['train:weight_decay'] )
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=params['train:scheduler_step'], gamma=params['train:scheduler_gamma'])
-        myloss = LpLoss(size_average=False)
+        
+        if 'tanh_loss' in params and params['nDIM']==2:
+            myloss = LpLoss(size_average=False , tanh_loss = params['tanh_loss'] )
+        else:
+            myloss = LpLoss(size_average=False ) 
 
         #--------------------------------------------
         list_output_info = []
@@ -912,60 +969,51 @@ class lib_ModelTrain:
             model.train()
             t1 = default_timer()
 
-            train_l2_full = 0
-            test_l2_full  = 0
-            # --
+            train_loss = 0
             for  train_a, train_p in train_loader:
 
-                assert train_a.shape[-1] == (T_in + T_out*T_d_out)*data_channel, "train_a.shape[-1]==(T_in+T_out*T_d_out)*data_channel"
+                assert train_a.shape[-1] == (T_in + T_out)*data_channel, "train_a.shape[-1]==(T_in+T_out)*data_channel"
 
                 train_a = train_a.to(device)  # train_a.shape[-1]== (T_in+T_out)*data_channel
                 train_p = train_p.to(device)  # train_p.shape[-1]== (T_in+T_out)*data_channel
                 current_batch_size = train_a.shape[0]
 
-                for idx in range(T_d_out):
-                    T_0 = idx*T_out*data_channel
-                    x  = train_a[...,T_0                  :T_0+ T_in       *data_channel]  # x.shape[-1]== T_in*data_channel
-                    yy = train_a[...,T_0+T_in*data_channel:T_0+(T_in+T_out)*data_channel]  # yy.shape[-1]== T_out*data_channel
-                    p  = train_p
+                x  = train_a[...,                 : T_in       *data_channel]  # x.shape[-1]== T_in*data_channel
+                yy = train_a[...,T_in*data_channel:(T_in+T_out)*data_channel]  # yy.shape[-1]== T_out*data_channel
+                p  = train_p
 
+                loss = 0
+                if 'std' in params['TrainLoss'] :
+                    pred = torch.zeros_like( yy , device= train_a.device)
+                    for t in range(T_out):
+                        y = yy[..., t*data_channel:(t+1)*data_channel]  # y.shape[-1]== 1*data_channel
+                        if params['num_PDEParameters'] ==0:      im = model(x)
+                        else:                                    im = model(x,p)
+                        pred[...,t*data_channel:(t+1)*data_channel] = im
+                        x = im
+                    loss +=  myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
 
-                    #--------------
-                    if params['option_nOutputStep'] > 1:
-                        if params['num_PDEParameters'] ==0:     pred = model(x)
-                        else:                                   pred = model(x,p)
-                    elif params['option_nOutputStep'] == 1:
-                        pred = torch.zeros_like( yy , device= train_a.device)
-                        for t in range(T_out):
-                            y = yy[..., t*data_channel:(t+1)*data_channel]  # y.shape[-1]== 1*data_channel
-                            if params['num_PDEParameters'] ==0:     im = model(x)
-                            else:                                   im = model(x,p)
-                            pred[...,t*data_channel:(t+1)*data_channel] = im
-                            x = im
-                    #--------------
+                if 'koop' in params['TrainLoss'] :
+                    #pred = torch.zeros_like( yy , device= train_a.device)
+                    if params['num_PDEParameters'] ==0:     pred = model(train_a[..., :1])
+                    else:                                   pred = model(train_a[..., :1],p)
+                    loss += myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
 
-                    if params['fourier:method_ParaEmbedding'] == 3:
-                        l2_full = myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1) , p_rescale_nu(p) )
-                    else:
-                        l2_full = myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
+                #--------------
+                train_loss += loss.item()
 
+                optimizer.zero_grad()
+                loss.backward()
 
-                    train_l2_full += l2_full.item()
+                if params['train:gradient_clip'] is not None:
+                    if params['parallel_run']:   nn.utils.clip_grad_norm_(model.module.parameters(), params['train:gradient_clip'] )
+                    else:                        nn.utils.clip_grad_norm_(model.parameters(),        params['train:gradient_clip'] )
 
-                    optimizer.zero_grad()
-                    # loss.backward()
-                    l2_full.backward()
-                    if params['train:gradient_clip'] is not None:
-                        if params['parallel_run']:
-                            nn.utils.clip_grad_norm_(model.module.parameters(), params['train:gradient_clip'] )
-                        else:
-                            nn.utils.clip_grad_norm_(model.parameters(), params['train:gradient_clip'] )
+                optimizer.step()
+                print('', end='.')
 
-                    optimizer.step()
-                    print('', end='.')
-
-            if ntest > 10:
-                # validation test
+            test_loss  = 0
+            if ntest > 10:     # validation test
                 model.eval()
                 with torch.no_grad():
                     for test_a, test_p in test_loader:
@@ -973,30 +1021,30 @@ class lib_ModelTrain:
                         test_p = test_p.to(device)
                         current_batch_size = test_a.shape[0]
 
-                        for idx in range(T_d_out):
-                            T_0 = idx * T_out * data_channel
-                            x  = test_a[..., T_0                 :T_0 + T_in * data_channel]
-                            yy = test_a[...,T_0+T_in*data_channel:T_0 + ( T_in + T_out) * data_channel]
-                            p = test_p
-                            # --------------
-                            if params['option_nOutputStep'] > 1:
-                                if params['num_PDEParameters'] == 0:     pred = model(x)
-                                else:                                    pred = model(x, p)
+                        x  = test_a[...,                  : T_in * data_channel]
+                        yy = test_a[..., T_in*data_channel: ( T_in + T_out) * data_channel]
+                        p = test_p
+                        # --------------
 
-                            elif params['option_nOutputStep']==1:
-                                #loss = 0
-                                for t in range(T_out):
-                                    y = yy[..., t * data_channel:(t + 1) * data_channel]
-                                    if params['num_PDEParameters'] == 0:     im = model(x)
-                                    else:                                    im = model(x, p)
-                                    # loss += myloss(im.reshape(current_batch_size, -1), y.reshape(current_batch_size, -1))
-                                    if t == 0:                    pred = im
-                                    else:                         pred = torch.cat((pred, im), -1)
-                                    x = torch.cat((x[..., 1 * data_channel:], im), dim=-1)
-                                    # test_l2_step += loss.item()
-                            # --------------
+                        loss = 0
+                        if 'std' in params['TrainLoss'] :
+                            pred = torch.zeros_like( yy , device= test_a.device)
+                            for t in range(T_out):
+                                y = yy[..., t*data_channel:(t+1)*data_channel]
+                                if params['num_PDEParameters'] ==0:     im = model(x)
+                                else:                                   im = model(x,p)
+                                pred[...,t*data_channel:(t+1)*data_channel] = im
+                                x = im
+                            loss += myloss(pred.reshape(current_batch_size, -1),  yy.reshape(current_batch_size, -1))
 
-                            test_l2_full += myloss(pred.reshape(current_batch_size, -1),  yy.reshape(current_batch_size, -1)).item()
+                        if 'koop' in params['TrainLoss'] :
+                            #pred = torch.zeros_like( yy , device= test_a.device)
+                            if params['num_PDEParameters'] ==0:     pred = model(test_a[..., :1])
+                            else:                                   pred = model(test_a[..., :1],p)
+                            loss += myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
+
+                        test_loss += loss.item()
+                        # --------------
 
 
             if params['parallel_run']:
@@ -1004,11 +1052,11 @@ class lib_ModelTrain:
                 # tensor with size of at least 1. So it should not be a scalar tensor, if it is
                 # you will need to put it into a 1-d tensor.
                 torch.distributed.barrier()
-                l2__for_print_due_to_ddp = torch.tensor([train_l2_full ,test_l2_full], dtype=torch.float).to(local_rank)
+                l2__for_print_due_to_ddp = torch.tensor([train_loss ,test_loss], dtype=torch.float).to(local_rank)
                 # Then, you perform the reduction (SUM in this case) across all devices
                 torch.distributed.all_reduce( l2__for_print_due_to_ddp , op=torch.distributed.ReduceOp.SUM)
-                train_l2_full = l2__for_print_due_to_ddp[0].item()
-                test_l2_full  = l2__for_print_due_to_ddp[1].item()
+                train_loss = l2__for_print_due_to_ddp[0].item()
+                test_loss  = l2__for_print_due_to_ddp[1].item()
 
 
             t2 = default_timer()
@@ -1022,7 +1070,7 @@ class lib_ModelTrain:
                     for key, value in output_dict.items():     print(value, end=' ')
                     print('')
 
-            output_info = (ep,   t2 - t1, train_l2_full / ntrain, test_l2_full / ntest )
+            output_info = (ep,   t2 - t1, train_loss / ntrain, test_loss / ntest )
             list_output_info.append(output_info)
 
             if global_rank == 0 :
@@ -1031,7 +1079,7 @@ class lib_ModelTrain:
                 save_train_log(filename_Saved_Model, output_dict)
 
                 # ----
-                writer.add_scalars('loss', {'train_full':train_l2_full / ntrain , 'test_full':test_l2_full / ntest } , ep )
+                writer.add_scalars('loss', {'train_full':train_loss / ntrain , 'test_full':test_loss / ntest } , ep )
                 #writer.add_scalar('time[s]', t2-t1, ep)
                 if 'tensorboard_fig1d' in params:
                     fig = params['tensorboard_fig1d'](ep, device)
@@ -1053,7 +1101,8 @@ class lib_ModelTrain:
                         bForceSaveNow = True
                         txt_SaveCtr = new_txt_SaveCtr
 
-            if global_rank == 0 and ( ep1 % params['train:epochs_per_save'] == 0 or bForceSaveNow):
+            #if global_rank == 0 and ( ep1 % params['train:epochs_per_save'] == 0 or bForceSaveNow):
+            if global_rank == 0 and ( ep1 in params['train:epochs_per_save'] or ep1 == params['train:epochs'] or bForceSaveNow):
                 if ep1 == params['train:epochs']:  filename_SaveNow = filename_Saved_Model
                 else:                              filename_SaveNow = filename_Saved_Model +'_ep{}'.format(ep1)
                 print(filename_SaveNow)
@@ -1070,10 +1119,10 @@ class lib_ModelTrain:
                 if filename_SaveNow[-3:] == '.pt':
                     if params['parallel_run']:
                         torch.save({ 'model_state_dict': model.module.state_dict(),
-                                     'ep': ep1,  'loss': {'train_full':train_l2_full / ntrain, 'test_full':test_l2_full / ntest }         }, filename_SaveNow )
+                                     'ep': ep1,  'loss': {'train_full':train_loss / ntrain, 'test_full':test_loss / ntest }         }, filename_SaveNow )
                     else:
                         torch.save({ 'model_state_dict': model.state_dict(),        'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
-                                     'ep': ep1,  'loss': {'train_full':train_l2_full / ntrain, 'test_full':test_l2_full / ntest }         }, filename_SaveNow )
+                                     'ep': ep1,  'loss': {'train_full':train_loss / ntrain, 'test_full':test_loss / ntest }         }, filename_SaveNow )
 
 
         # ---------------------------
@@ -1090,5 +1139,4 @@ def save_train_log(filename_Saved_Model,output_dict):
     pickle.dump(output_dict, open_file)
     open_file.close()
 
-#%%
 

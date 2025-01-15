@@ -17,6 +17,12 @@ import numpy as np
 from flame_net.MyConvNd import MyConvNd, nn_MaxPoolNd, nn_AvgPoolNd , Fc_PDEpara , my_NormNd # ,nn_BatchNormNd
 
 
+#-----------------------------------
+#  This file implements the Paramertical Convolutional Neural Network (pCNN) for solving PDEs
+#
+#    [Yu, R., & Hodzic, E. (2024). Parametric learning of time-advancement operators for unstable flame evolution. Physics of Fluids, 36(4).]
+#    [Yu, R., Hodzic, E., & Nogenmyr, K. J. (2024). Learning Flame Evolution Operator under Hybrid Darrieus Landau and Diffusive Thermal Instability. Energies, 17(13), 3097.]    
+#-----------------------------------
 
 
 class ConvPDE_Nd(nn.Module):

@@ -16,6 +16,16 @@ import numpy as np
 def p_rescale_nu(p):
     return (1 - (0.025/p)**1.5 )+0.2
 
+
+#-----------------------------------------------------
+#  This file implements the Paramertical Fourier Neural Operator (pFNO) for solving PDEs
+#
+#    [Yu, R., & Hodzic, E. (2024). Parametric learning of time-advancement operators for unstable flame evolution. Physics of Fluids, 36(4).]
+#    [Yu, R., Hodzic, E., & Nogenmyr, K. J. (2024). Learning Flame Evolution Operator under Hybrid Darrieus Landau and Diffusive Thermal Instability. Energies, 17(13), 3097.]    
+#-----------------------------------------------------
+
+
+
 ################################################################
 # require torch.__version__ > 1.12   # allow einsum for complex number
 ################################################################
@@ -462,15 +472,11 @@ class SpectralConv_Nd_ParaModeScaling(nn.Module):
 # #------------------------------------
 
 
-
-
 class PFNO_Nd(nn.Module):
     def __init__(self, nDIM, modes_fourier, width,
-                 #method_TimeAdv='simple',
                  T_in=1, depth=4,
                  num_PDEParameters=0,
                  data_channel=1,
-                 #method_Attention=0,
                  method_WeightSharing=0,
                  method_SkipConnection=0,
                  method_BatchNorm = 0,    # can be -1 (standard_batch_norm),  0 (no norm) or N_grid (e.g. 256,  for layer_norm)
@@ -483,8 +489,6 @@ class PFNO_Nd(nn.Module):
                  method_ParaEmbedding = True,
                  option_RealVersion = False,   # default using the complex version
                  method_outputTanh    =  None,
-                 option_nOutputStep = 1,
-                 method_SteadySolution = False,
                  Use_2d_DCT = False ):
         super(PFNO_Nd, self).__init__()
         """
@@ -532,7 +536,6 @@ class PFNO_Nd(nn.Module):
         self.PDEPara_ReScaling = PDEPara_ReScaling
         #self.PDEPara_variable_mode = False
 
-        self.option_nOutputStep = option_nOutputStep
         #
         num_level_unrepeated = self.depth if self.method_WeightSharing==0 else 1
 
@@ -548,9 +551,6 @@ class PFNO_Nd(nn.Module):
             #     self.conv.append( SpectralConv_Nd(self.width, self.width, self.modes_fourier) )
 
             actual_modes_fourier = self.modes_fourier
-            if self.option_nOutputStep > 1 :
-                actual_modes_fourier = [ self.modes_fourier, self.option_nOutputStep//2 + 1 ]
-
             #-----
             if self.option_RealVersion == False:
                 self.conv.append( SpectralConv_Nd_ParaModeScaling(            self.width, self.width, actual_modes_fourier, PDEPara_mode_level = self.PDEPara_mode_level ,Use_2d_DCT=Use_2d_DCT ) )
@@ -558,18 +558,13 @@ class PFNO_Nd(nn.Module):
                 self.conv.append( SpectralConv_Nd_ParaModeScaling_RealVersion(self.width, self.width, actual_modes_fourier, PDEPara_mode_level = self.PDEPara_mode_level ,Use_2d_DCT=Use_2d_DCT ) )
             #-----
 
-            if self.option_nOutputStep > 1 :
-                if self.nDIM == 2:                self.w.append( nn.Conv3d(self.width, self.width, 1)  )
-                elif self.nDIM==1:                self.w.append( nn.Conv2d(self.width, self.width, 1)  )
-            elif self.option_nOutputStep == 1 :
-                if self.nDIM == 2:                self.w.append( nn.Conv2d(self.width, self.width, 1)  )
-                elif self.nDIM==1:                self.w.append( nn.Conv1d(self.width, self.width, 1)  )
+            if self.nDIM == 2:                self.w.append( nn.Conv2d(self.width, self.width, 1)  )
+            elif self.nDIM==1:                self.w.append( nn.Conv1d(self.width, self.width, 1)  )
 
         if self.method_BatchNorm is True:
             self.bn = nn.ModuleList()
             for l in range( num_level_unrepeated ):
-                if self.option_nOutputStep > 1 :      self.bn.append(  my_NormNd(self.nDIM +1 , self.width, self.method_BatchNorm )  )
-                elif self.option_nOutputStep == 1 :   self.bn.append(  my_NormNd(self.nDIM    , self.width, self.method_BatchNorm )  )
+                self.bn.append(  my_NormNd(self.nDIM    , self.width, self.method_BatchNorm )  )
 
         if self.num_PDEParameters >= 1:
             if self.PDEPara_mode_level is not None: # learning  PDEs with multi parameters
@@ -612,19 +607,10 @@ class PFNO_Nd(nn.Module):
         else:
             self.fc_in = nn.Linear( num_InputChannel*self.data_channel, self.width)
 
-        if self.option_nOutputStep > 1 :
-            self.fc_in_nOutputStep = nn.Linear( 1, self.option_nOutputStep )
-            #nn.Sequential(nn.Linear( 1,20),  nn.ReLU(), nn.Linear( 20, 20 ), nn.ReLU(),nn.Linear( 15, self.option_nOutputStep )  )
 
         # input channel is T_in: the solution of the previous T_in timesteps # + 1 location (u(t-10, x), ..., u(t-1, x),  x)
         self.fc_out0 = nn.Linear(self.width, 128)
         self.fc_out1 = nn.Linear(128, 1*self.data_channel )
-
-        self.method_SteadySolution = method_SteadySolution
-        if self.method_SteadySolution == True:
-             # self.SteadySolution_F_EpsPara = SteadySolution_F_EpsPara(self.num_PDEParameters)
-            self.fc_out0_A = nn.Linear(self.width, 64)
-            self.fc_out1_A = nn.Linear(64, 1 )
 
         return
 
@@ -785,34 +771,14 @@ class PFNO_Nd(nn.Module):
                 if hasattr( self,'Use_2d_DCT'): x = self.fc_in(x).permute(0, 4, 1, 3, 2)
                 else:                           x = self.fc_in(x).permute(0, 4, 1, 2, 3)  # default
 
-        if hasattr(self,'option_nOutputStep'):
-            if self.option_nOutputStep > 1 :
-                if self.T_in == 1:
-                    #if self.nDIM == 1:   x = x.unsqueeze(-1).repeat(1,1,1,self.option_nOutputStep)
-                    #elif self.nDIM==2:   x = x.unsqueeze(-1).repeat(1,1,1,1,self.option_nOutputStep)
-                    x = self.fc_in_nOutputStep( x.unsqueeze(-1) )
-                elif self.T_in > 1 :
-                    assert self.T_in == self.option_nOutputStep
         #
         x=self.depth_advance_fixed_width(x,fourierweight_scaling, HighFreqScaling )
         #
 
-        if hasattr(self,'option_nOutputStep'):
-            if self.option_nOutputStep > 1:
-                if self.nDIM == 1:                  x = x.permute(0, 2, 3, 1 )
-                elif self.nDIM==2:
-                    if hasattr( self,'Use_2d_DCT'): x = x.permute(0, 3, 2, 4, 1 )
-                    else:                           x = x.permute(0, 2, 3, 4, 1 )  # default
-            elif self.option_nOutputStep == 1:
-                if self.nDIM == 1:                  x = x.permute(0, 2, 1 )
-                elif self.nDIM==2:
-                    if hasattr( self,'Use_2d_DCT'): x = x.permute(0, 3, 2, 1 )
-                    else:                           x = x.permute(0, 2, 3, 1 )  # default
-        else:
-            if self.nDIM == 1:                  x = x.permute(0, 2, 1 )
-            elif self.nDIM==2:
-                if hasattr( self,'Use_2d_DCT'): x = x.permute(0, 3, 2, 1 )
-                else:                           x = x.permute(0, 2, 3, 1 )  # default
+        if self.nDIM == 1:                  x = x.permute(0, 2, 1 )
+        elif self.nDIM==2:
+            if hasattr( self,'Use_2d_DCT'): x = x.permute(0, 3, 2, 1 )
+            else:                           x = x.permute(0, 2, 3, 1 )  # default
 
 
         #
@@ -825,29 +791,6 @@ class PFNO_Nd(nn.Module):
         u = torch.relu( u )
         u = self.fc_out1(u)
 
-
-
-        if hasattr(self,'option_nOutputStep'):
-            if self.option_nOutputStep > 1:
-                u = u.view( u.shape[:-1] )
-
-
-        #
-        # --------- for handling the long term steady solution  ------------
-        if hasattr(self, 'method_SteadySolution'):
-            if self.method_SteadySolution == True:
-                # if self.nDIM ==1:    eps = torch.linalg.norm( x-xx, dim=(   -2,-1) )/ (torch.linalg.norm(xx, dim= (   -2,-1) ) + 1E-3)
-                # elif self.nDIM ==2:  eps = torch.linalg.norm( x-xx, dim=(-3,-2,-1) )/ (torch.linalg.norm(xx, dim= (-3,-2,-1) ) + 1E-3)
-                # f = self.SteadySolution_F_EpsPara( eps.unsqueeze(-1), paras )     # paras.shape = batch, num_PDEParameters
-                # if self.nDIM ==1:    x = xx + (x-xx) * f.view(f.shape[0],1,1)
-                # elif self.nDIM ==2:  x = xx + (x-xx) * f.view(f.shape[0],1,1,1)
-
-                delta_u = torch.tanh( u  )
-                if self.nDIM == 1:      A_u= 1+torch.celu( 10* self.fc_out1_A( torch.relu( self.fc_out0_A( x ) ) ).mean(    (-2), keepdim=True)  )
-                elif self.nDIM == 2:    A_u= 1+torch.celu( 10* self.fc_out1_A( torch.relu( self.fc_out0_A( x ) ) ).mean( (-3,-2), keepdim=True)  )
-
-                u = xx + delta_u * A_u
-                return u
 
         if hasattr(self,'method_outputTanh'):
             u = torch.tanh( u )
