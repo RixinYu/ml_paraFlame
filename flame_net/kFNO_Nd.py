@@ -16,9 +16,10 @@ import numpy as np
 
 # --------------------------------------------------------------------------------------------------------------------------
 #
-#  This file of 'kFNO_Nd.py' is a 'cleaner' implemention of (N-dimentional) 'Koopman theory-inspired Fourier Neural Operator' (kFNO) 
-#  A second (early) implementaion of kFNO can be found in the file 'tFNO_Nd.py' which contains more options (for debug/test purpose), 
-#  'tFNO_Nd' can reduces to 'kFNO_Nd' under proper choices of parameters. 
+#  This file of 'kFNO_Nd.py' is a 'cleaner' implemention of (N-dimentional) 'Koopman theory-inspired Fourier Neural Operator' (kFNO),
+#  A second implementaion of kFNO can be found in 'tFNO_Nd.py' which contains more debugging/testing options, 
+#  'tFNO_Nd' could be reduced to 'kFNO_Nd' under proper choices of parameters, 
+#  Note, instead of this 'kFNO_Nd', 'tFNO_Nd' is the exact code used in the following paper:
 #
 #  [Yu, R., Herbert, M., Klein, M. and Hodzic, E., 2024. Koopman Theory-Inspired Method for Learning Time Advancement Operators in Unstable Flame Front Evolution. arXiv preprint arXiv:2412.08426.]
 #
@@ -96,8 +97,11 @@ class SpectralConv_Nd(nn.Module):
             # ------------------------------------
             if 'dct[1]' in self.basis_type:
                 dim_dct, dim_other = -2, (-3,-1)
-                x_xflip = torch.cat ( [ x, x.flip([dim_dct])[...,1:-1,:] ], dim=dim_dct )
-                x_dct1  = torch.fft.fft(   x_xflip,  dim=dim_dct  , norm="ortho").real[..., :x.size(dim_dct),:] # 1d-dct-along-z
+                
+                # x_xflip = torch.cat ( [ x, x.flip([dim_dct])[...,1:-1,:] ], dim=dim_dct )
+                # x_dct1  = torch.fft.fft(   x_xflip,  dim=dim_dct , norm="ortho").real[..., :x.size(dim_dct),:] # 1d-dct-along-z
+                x_dct1  = torch.fft.hfft( x , dim=dim_dct , norm="ortho")[...,:x.size(dim_dct),:] # 1d-dct-along-z, implemented using hermitian-fft
+                
                 x_ft    = torch.fft.rfftn( x_dct1, dim=dim_other, norm="ortho")                               # 1d-rfft-along-xy
                 out_ft  = torch.zeros(batchsize, self.out_channels,  x.size(-3), x.size(-2),  x.size(-1)//2 + 1, dtype=torch.cfloat, device=x.device)
             else:
@@ -111,8 +115,12 @@ class SpectralConv_Nd(nn.Module):
             out_ft[:, :,-k0:  ,-k1:  , :k2] = einsum_op( 'bixyz,xyzio->boxyz', x_ft[:,:,-k0:  ,-k1:  , :k2], self.weights4)
             # ----
             if 'dct[1]' in self.basis_type:
+                
                 x_dct1 = torch.fft.irfftn( out_ft, dim= dim_other, norm='ortho')
-                x      = torch.fft.ifft(  torch.cat([x_dct1, x_dct1.flip([dim_dct])[..., 1:-1,:]], dim=dim_dct), dim = dim_dct, norm="ortho" ).real[ ...,:x.size(dim_dct),:]
+
+                #x      = torch.fft.ifft(  torch.cat([x_dct1, x_dct1.flip([dim_dct])[..., 1:-1,:]], dim=dim_dct), dim = dim_dct, norm="ortho" ).real[ ...,:x.size(dim_dct),:]
+                x      = torch.fft.irfft(  x_dct1, dim = dim_dct, norm="ortho" )[ ...,:x.size(dim_dct),:]  # 1d-inverse-dct, implemented using irfft 
+
             else:
                 x = torch.fft.irfftn(  out_ft,  dim=[-3,-2,-1], norm='ortho' )
 
@@ -120,16 +128,24 @@ class SpectralConv_Nd(nn.Module):
             # ------------------------------------
             if 'dct[1]' in self.basis_type:
                 dim_dct, dim_other = -1, -2
-                x_xflip = torch.cat ( [ x, x.flip([dim_dct])[...,1:-1] ], dim=dim_dct )
-                x_dct1  = torch.fft.fft(  x_xflip,  dim=dim_dct  , norm="ortho").real[..., :x.size(dim_dct)] # 1d-dct-along-y
+                
+                # x_xflip = torch.cat ( [ x, x.flip([dim_dct])[...,1:-1] ], dim=dim_dct )
+                # x_dct1  = torch.fft.fft(  x_xflip,  dim=dim_dct  , norm="ortho").real[..., :x.size(dim_dct)] # 1d-dct-along-y
+                x_dct1  = torch.fft.hfft( x , dim=dim_dct , norm="ortho")[...,:x.size(dim_dct)] # 1d-dct-along-y, implemented using hermitian-fft
+
+
                 x_ft    = torch.fft.rfft( x_dct1, dim=dim_other, norm="ortho")                             # 1d-rfft-along-x
                 out_ft  = torch.zeros(batchsize, self.out_channels,  x.size(-2)//2 + 1,  x.size(-1), dtype=torch.cfloat, device=x.device)
                 #---------
                 k0, k1    = self.modes_fourier
                 out_ft[:,:,  :k0,    :k1]    = einsum_op( 'bixy,xyio->boxy', x_ft[:, :,  :k0,    :k1], self.weights1 )
                 out_ft[:,:,  :k0, -k1:  ]    = einsum_op( 'bixy,xyio->boxy', x_ft[:, :,  :k0, -k1: ], self.weights2 )
+                
                 x_dct1 = torch.fft.irfft( out_ft, dim= dim_other, norm='ortho')
-                x      = torch.fft.ifft(  torch.cat([x_dct1, x_dct1.flip([dim_dct])[..., 1:-1]], dim=dim_dct), dim = dim_dct, norm="ortho" ).real[ ...,:x.size(dim_dct)]
+                
+                #x     = torch.fft.ifft(  torch.cat([x_dct1, x_dct1.flip([dim_dct])[..., 1:-1]], dim=dim_dct), dim = dim_dct, norm="ortho" ).real[ ...,:x.size(dim_dct)]
+                x      = torch.fft.irfft(  x_dct1, dim = dim_dct, norm="ortho" )[ ...,:x.size(dim_dct)] # 1d-inverse-dct, implemented using irfft 
+
             else:
                 x_ft    = torch.fft.rfftn(x, dim=[-2,-1], norm="ortho")
                 out_ft  = torch.zeros(batchsize, self.out_channels,  x.size(-2),  x.size(-1)//2 + 1, dtype=torch.cfloat, device=x.device)
@@ -217,7 +233,7 @@ class kFNO_Nd(nn.Module):
                  option_RealVersion = False,   # default using the complex version
                  method_outputTanh    =  None,
                  basis_type= '',
-                 depth_proj=4, depth_tAdv=2,out_channel=1):  # lNorm = None,    # layer norm
+                 depth_lift=3,depth_tAdv=2,depth_proj=1, out_channel=1):  # lNorm = None,    # layer norm
 
         super(kFNO_Nd, self).__init__()
 
@@ -233,13 +249,14 @@ class kFNO_Nd(nn.Module):
         self.width            = width
         self.in_channel       = in_channel
         self.out_channel      = out_channel
-        self.kTimeStepping     = kTimeStepping
+        self.kTimeStepping    = kTimeStepping
         self.FourierTimeDIM   = FourierTimeDIM
         self.basis_type       = basis_type
         self.method_WeightSharing = method_WeightSharing
         self.method_SkipConnection = method_SkipConnection
 
         self.depth_proj = depth_proj
+        self.depth_lift = depth_lift
 
         self.linearKoopmanAdv = linearKoopmanAdv
         self.depth_tAdv = depth_tAdv if self.linearKoopmanAdv==False else 1
