@@ -29,6 +29,11 @@ def main( params_ex ) :
     #            [40,0],[40,0.25],[40,0.5], [40,0.75], [40,1]  ]
     #--------------------
     
+    #-----------------
+    if type( params_ex['rho'] ) is str:
+        params_ex['rho'] = float( params_ex['rho'] )
+    #-----------------
+
     list_para = [ [ params_ex['Lpi'], params_ex['rho'] ] ]
 
     data_sys = Cdata_sys('MKS_RK4',list_para, num_PDEParameters=0 )
@@ -110,6 +115,7 @@ def main( params_ex ) :
     #----------------------
     
     params['train:gradient_clip'] = 30
+    params['train:epochs_per_save'] = [900]
     params['tensorboard_logdir_prefix'] = ''           # 'paraR_'
     #params['model_name_prefix'] ='' 
     

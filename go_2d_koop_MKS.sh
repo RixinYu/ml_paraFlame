@@ -2,9 +2,10 @@
 #SBATCH -A NAISS2024-22-378 -p alvis
 
 ###-----   #SBATCH -t 110:00:00   # For Conv
+
 #SBATCH -t 94:00:00     # For Fourier
 
-#SBATCH --gpus-per-node=A100:1
+#SBATCH --gpus-per-node=A100:1 #A40:1
 
 ###----   #SBATCH -a 0-5 (round 1)
 ###----   #SBATCH -a 0-5 (round 2)
@@ -12,10 +13,17 @@
 ###----   #SBATCH -a 0-0  # (round 4)
 ###----   #SBATCH -a 0-0  # (round 5) 
 ###----   #SBATCH -a 0-2  # (round 6)  # The screen output from round 6 have mistakenly flushed those from previous round 5
-#SBATCH -a 0-1  # (round 7)
+###----   #SBATCH -a 0-1  # (round 7)
+###---  #SBATCH -o out_2d_koop_MKS_round7_%a
+###---  #SBATCH -e out_2d_koop_MKS_round7_%a
 
-#SBATCH -o out_2d_koop_MKS_round7_%a
-#SBATCH -e out_2d_koop_MKS_round7_%a
+#----------------------------
+### #SBATCH -a 0-1  # (AI-fluid Conf 2025)
+#SBATCH -a 2-3      # (AI-fluid Conf 2025)
+
+#SBATCH -o out_2d_koop_MKS_AIfluidConf2025_%a
+#SBATCH -e out_2d_koop_MKS_AIfluidConf2025_%a
+
 
 
 
@@ -59,8 +67,17 @@ module load PyTorch/2.1.2-foss-2023a-CUDA-12.1.1 tensorboard/2.15.1-gfbf-2023a  
 # pArr+=("Lpi:25,rho:1,prefix:rerun3_,seed:6,batchsize:40")
 
 #--- round 7
-pArr=("Lpi:25,rho:1,prefix:rerun4_,seed:7,batchsize:40")
-pArr+=("Lpi:25,rho:1,kTimeStepping:1,prefix:rerun3_,seed:7,batchsize:35")
+#pArr=("Lpi:25,rho:1,prefix:rerun4_,seed:7,batchsize:40")
+#pArr+=("Lpi:25,rho:1,kTimeStepping:1,prefix:rerun3_,seed:7,batchsize:35")
+
+
+#--- New Round for AI-fluid Conf 2025
+pArr=("Lpi:15,rho:0.5")
+pArr+=("Lpi:15,rho:0.5,kTimeStepping:1,batchsize:48,prefix:rerun_")
+
+
+pArr+=("Lpi:15,rho:0.5,skipC:0,batchsize:48,kTimeStepping:1")
+pArr+=("Lpi:15,rho:0.5,skipC:0,batchsize:48")
 
 python train2d_koop_MKS.py  ${pArr[$SLURM_ARRAY_TASK_ID]} 
 

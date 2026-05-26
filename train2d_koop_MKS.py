@@ -28,6 +28,11 @@ def main( params_ex ) :
     #            [25,0],[25,0.25],[25,0.5], [25,0.75], [25,1],
     #            [40,0],[40,0.25],[40,0.5], [40,0.75], [40,1]  ]
     #--------------------
+
+    #-----------------
+    if type( params_ex['rho'] ) is str:
+        params_ex['rho'] = float( params_ex['rho'] )
+    #-----------------
     
     list_para = [ [ params_ex['Lpi'], params_ex['rho'] ] ]
 
