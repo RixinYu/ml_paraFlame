@@ -11,6 +11,11 @@ import torch.nn as nn
 import numpy as np
 #import torch.nn as nn
 import matplotlib.pyplot as plt
+from copy import deepcopy
+import gc  # gpu memory garbage collection
+
+
+import shutil  # to remove old checkpoint dir when start a new training
 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -29,11 +34,26 @@ from timeit import default_timer
 import time
 import pickle
 
-from flame_net.libSiva import libSiva, CSolverSiva , round_num_to_txt
+
+#--------------------------------------------------
+#  Solver for 1D Michelson-Sivashinsky and Kuramoto-Sivashinsky equations, 
+#   which is the simplified models for intrinsic flame instabilities (e.g. Darrieus-Landau and difussion-thermal instability)
+#
+from flame_net.libSiva import libSiva, CSolverSiva  
+from flame_net.libSiva import round_num_to_txt
+
+#
+# Solver for 1D and 2D Korteweg-de Vries (KDV) equation,  2D-KDV is also known as the Kadomtsev-Petviashvili (KP) equation
+from flame_net.libKDV  import  CSolverKDV      
+from flame_net.libBurgers import  CSolverBurgers  # Solver for 1D Burgers Equation
+
+#
 from flame_net.libData import libData
 from flame_net.libcfdData import libcfdData
 
-from flame_net.PFNO_Nd import PFNO_Nd, p_rescale_nu
+
+
+from flame_net.PFNO_Nd import PFNO_Nd       # parameterized fourier neural operator (PFNO) method
 
 
 #from flame_net.DeepONet_1d import DeepONet_1d
@@ -43,15 +63,27 @@ from flame_net.PFNO_Nd import PFNO_Nd, p_rescale_nu
 
 from flame_net.ConvPDE_Nd import ConvPDE_Nd
 
-from flame_net.kFNO_Nd import kFNO_Nd
-from flame_net.kConv_Nd import kConv_Nd
+from flame_net.kFNO_Nd import kFNO_Nd                # A simplifed version of kFNO (but recommend to use tFNO instead)
+from flame_net.kConv_Nd import kConv_Nd              # koopman theory inspired convolution neural operator (kConv) 
 
-from flame_net.tFNO_Nd import tFNO_Nd
+from flame_net.tFNO_Nd    import tFNO_Nd             # koopman theory inspired fourier neural operator (kFNO)
+
+from flame_net.RevtFNO_Nd import RevtFNO_Nd          # Inverse scattering inspired fourier neural operator (IS-FNO)
+from flame_net.RevtFNO_Nd import SpectralConv_MatrixExp_Nd
+
+from flame_net.tCFNO_2d import tCFNO_2d              # koopman neural operator using a mixed convolutional+Fourier layer, which were used to learn the complex DNS fractal flames
+
+
 #################################################
 #
 # lib Utilities
 #
 #################################################
+def gpu_memory_stats():
+    print('gpu_allocated = ', torch.cuda.memory_allocated()/1024**2)
+    print('gpu_cached      = ', torch.cuda.memory_cached()/1024**2)
+    return
+
 #device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 def tensorboard_fig2d_monitor(va_Pair_pick, vaPDEPara_Pair_pick, model, device , nInputStep=1, nOutputStep=1 ):
@@ -123,10 +155,10 @@ class my_cfd_DataSet(torch.utils.data.Dataset):
 
         self.list_y = []
         for y in list_y:
-            self.list_y.append(  torch.tensor( y, dtype=torch.float ).movedim(0,-1)  )
+            self.list_y.append(  torch.tensor( y, dtype=torch.get_default_dtype() ).movedim(0,-1)  )
 
         for p in list_para:
-            self.list_para.append(  torch.tensor( p , dtype=torch.float ) )
+            self.list_para.append(  torch.tensor( p , dtype=torch.get_default_dtype()  ) )
 
         self.Len_y      = np.zeros( len(list_y) , dtype = int)
         self.Len_cumsum = np.zeros( len(list_y) , dtype = int)
@@ -161,11 +193,11 @@ class my_cfd_DataSet(torch.utils.data.Dataset):
 class Cdata_sys:
     def __init__(self,sys_name='MS_RK4', list_para=[0.025,0.05,0.2], list_cfdfilename=None, method_default_siva_data_gen=1, num_PDEParameters = 1):
 
-        assert( sys_name  in ['MS_1storder', 'MS_RK4',  'KS_RK4', 'MKS_RK4', 'cfd'] )
+        assert( sys_name  in ['MS_1storder', 'MS_RK4',  'KS_RK4', 'MKS_RK4', 'cfd' , 'KDV_RK4','Burgers_RK4'] )
         assert type(list_para)==list
 
         self.sys_name = sys_name
-        self.list_para         = list_para
+        self.list_para        = list_para
         self.list_cfdfilename = list_cfdfilename
         self.method_default_siva_data_gen=method_default_siva_data_gen
         self.num_PDEParameters = num_PDEParameters
@@ -187,6 +219,8 @@ class Cdata_sys:
         elif 'KS_RK4' == self.sys_name:      return 'Lpi'
         elif 'MKS_RK4' == self.sys_name:     return 'Lpi_rho'
         elif 'cfd' in self.sys_name:         return 'cfdfilename'
+        elif 'KDV_RK4' == self.sys_name:     return 'LpiKDV'
+        elif 'Burgers_RK4' == self.sys_name: return 'LpiBurgers'
         else:                                raise ValueError('para_name')
 
 # print('count_learnable_params=', str( count_learnable_params(model) ) )
@@ -207,7 +241,7 @@ class lib_Model:
                   'method_TimeAdv':'simple',
                   'method_outputTanh':None,
                   'parallel_run': False,
-                  'fourier:modes_fourier':32,
+                  'fourier:modes_fourier':[32],
                   'fourier:width':20,
                   'fourier:depth':4,
                   'fourier:method_Attention': 0,
@@ -216,7 +250,7 @@ class lib_Model:
                   'fourier:brelu_last': 1,
                   'fourier:method_BatchNorm': 0,
                   'fourier:PDEPara_mode_level': None,  # could also be 3, [3,6]
-                  'fourier:basis_type':'',
+                  'fourier:basis_type':'',             
                   'PDEPara_fc_class':'',
                   'PDEPara_ReScaling': None,
                   'fourier:method_ParaEmbedding':True,
@@ -227,7 +261,9 @@ class lib_Model:
                   'fourier:linearKoopmanAdv': False, # may be removed later since it is override when params['fourier:depth_conv']['ftAdv'] == 1
                   'FourierTimeDIM': False,
                   'fourier:reversible': False,
-                  'fourier:depth_conv': {'tAdv': 2, 'lift': 3, 'proj': 1, 'rev': 2},
+                  'fourier:modes_fourier_rev':[32],
+                  'fourier:width_rev': 30,
+                  'fourier:depth_conv': {'tAdv': 2, 'lift': 3, 'proj': 1, 'tAdv_last_nonlinear':False,  'rev': [2,2], 'tAdv_basis':'exp' },
                   'onet:type_branch':'conv',
                   'onet:P': 30,
                   'onet:fc_layers_branch':[100,100,100,100],
@@ -250,7 +286,7 @@ class lib_Model:
                   'conv:PDEPara_PathNum': 1,
                   'conv:method_ParaEmbedding':False
         }
-
+ 
         #---------------------------------------
         params['T_in'] = 1
         params['T_out'] =20
@@ -268,19 +304,26 @@ class lib_Model:
         params['data:nStepSkip'] = 1
         params['Nx'] = 128
         #---------
+        params['train:scheduler'] = 'StepLR'        
         params['train:weight_decay'] = 1e-4
         params['train:data_norm_rms'] = 1
         params['train:checkpoint_dir'] = './checkpoints'
         params['train:checkpoint_resume'] = None
         params['train:batch_size'] = 2000
-        params['train:learning_rate'] = 0.0025
+        params['train:learning_rate'] = 0.0025  # * 512
+        params['train:eps'] = 1e-6
         params['train:scheduler_step'] = 100
         params['train:scheduler_gamma'] = 0.5
         params['train:epochs'] = 1000
         params['train:epochs_per_save'] = [100,200,300,400,500,600,700,800,900]
+        params['train:nstep_save_best']=5
+        params['train:NUM_gradient_accumulation_STEPS'] = 1
         params['optimizer_method']=torch.optim.Adam
         params['train:gradient_clip'] = None
         params['Trainloss'] ='std'  # or 'koop'
+        params['data:upsample'] = 1
+        #params['train:grad_scaler']=False
+
         #if nDIM == 1:
             #params['yB_1DNormalization'] =  np.array([-0.7,1.3])*np.pi
 
@@ -311,23 +354,51 @@ class lib_Model:
     @staticmethod
     def build_model(model_name_detail,params):
 
-        if 'tFNO' in model_name_detail:
+        if 'tFNO' in model_name_detail and params['fourier:reversible'] == False:
+            #
+            # Koopman theory inspired fourier neural operator (kFNO) method
+            #
             basis_type = 'dct[1]'+params['fourier:basis_type'] if params['nDIM']==2 and params['Use_2d_DCT']==True else params['fourier:basis_type']
-            model = tFNO_Nd( params['nDIM'], params['fourier:modes_fourier'],  params['fourier:width'],
-                             bReversible_Uplift_Downproj=params['fourier:reversible'],
-                             FourierTimeDIM=params['FourierTimeDIM'],
-                             in_channel=params['T_in'], kTimeStepping=params['kTimeStepping'],
-                             depth_conv=params['fourier:depth_conv'] , #default: {'tAdv': 2, 'lift': 3, 'proj': 1, 'rev': 2},
-                             method_SkipConnection=params['fourier:method_SkipConnection'], 
-                             method_WeightSharing=params['fourier:method_WeightSharing'], 
-                             basis_type=basis_type,
-                             option_RealVersion=params['fourier:option_RealVersion'],
+
+            model = tFNO_Nd( params['nDIM'], params['fourier:modes_fourier'],  params['fourier:width'],  
+                            #bReversible_Uplift_Downproj=params['fourier:reversible'],  # this parameter is deprecated since the reversible version is now a separate model, i.e. RevtFNO_Nd
+                            FourierTimeDIM=params['FourierTimeDIM'],
+                            in_channel=params['T_in'], kTimeStepping=params['kTimeStepping'],
+                            depth_conv=params['fourier:depth_conv'], #default: {'tAdv': 2, 'lift': 3, 'proj': 1, 'rev': 2},
+                            method_SkipConnection=params['fourier:method_SkipConnection'], 
+                            method_WeightSharing=params['fourier:method_WeightSharing'], 
+                            basis_type=basis_type,
+                            option_RealVersion=params['fourier:option_RealVersion'],      # may be removed later if Nvida update their cuFFT library
                             ).cuda()
 
+        elif 'RevtFNO' in model_name_detail and params['fourier:reversible'] == True :
+            #
+            # Inverse scattering insipred fourier neural operator(IS-FNO) method
+            #
+            model = RevtFNO_Nd( params['nDIM'], params['fourier:modes_fourier'],  params['fourier:width'], params['fourier:width_rev'],
+                            in_out_channel=params['T_in'], kTimeStepping=params['kTimeStepping'],
+                            depth_conv=params['fourier:depth_conv'] , #default: {'tAdv':1, 'rev':[2,2], 'tAdv_basis':'' },  # 'tAdv_basis' can be be  'exp_roll', 'exp_pure_roll', 'exp_k^3', 'exp_k'
+                            method_SkipConnection=params['fourier:method_SkipConnection'], 
+                            method_WeightSharing=params['fourier:method_WeightSharing'], 
+                            basis_type=params['fourier:basis_type'] ).cuda()              # M_upsample= params['fourier:upsample'] 
+
+
+
+        elif 'tCFNO' in model_name_detail and params['nDIM']==2:
+            #
+            #  koopman neural operator using a mixed convolutional+Fourier layer
+            #
+            model = tCFNO_2d( params['fourier:modes_fourier'][0],  params['fourier:modes_fourier'][1], params['fourier:width'],                             
+                             params['T_in'], params['kTimeStepping'], 
+                             params['fourier:depth_conv'],
+                             params['fourier:method_SkipConnection'],
+                             params['fourier:method_WeightSharing']).cuda()
+            
         elif 'kFNO' in model_name_detail:
-
+            #
+            # This is an alternative, but not validated, implementation of Koopman theory-inspired fourier neural operator method
+            #
             basis_type = 'dct[1]'+params['fourier:basis_type'] if params['nDIM']==2 and params['Use_2d_DCT']==True else params['fourier:basis_type']
-
             model = kFNO_Nd( params['nDIM'], params['fourier:modes_fourier'],   params['fourier:width'],
                              params['fourier:linearKoopmanAdv'],  params['FourierTimeDIM'],
                              params['T_in'], params['kTimeStepping'], params['fourier:method_WeightSharing'], params['fourier:method_SkipConnection'],
@@ -339,6 +410,7 @@ class lib_Model:
                                params['conv:en1_channels'], params['conv:de1_channels'],
                                params['conv:method_types_conv'],
                                params['conv:method_BatchNorm'],params['method_outputTanh'] ).cuda()
+
         elif 'FNO' in model_name_detail:
             model = PFNO_Nd( params['nDIM'],
                              params['fourier:modes_fourier'],
@@ -392,11 +464,13 @@ class lib_Model:
         elif params['num_PDEParameters']==2:           model_name_detail += 'p2'
 
         if 'onet' in model_name.casefold():           model_name_detail +=  'ONet'
-        elif 'tfno' in model_name.casefold():         model_name_detail += 'tFNO'
-        elif 'kconv' in model_name.casefold():        model_name_detail += 'kConv'
-        elif 'conv' in model_name.casefold():         model_name_detail +=  'Conv'
-        elif 'kfno' in model_name.casefold():         model_name_detail += 'kFNO'
-        elif 'fno' in model_name.casefold():          model_name_detail +=  'FNO'
+        elif 'revtfno' in model_name.casefold():      model_name_detail += 'RevtFNO'     # IS-FNO: inverse scattering inspired fourier neural operator
+        elif 'tfno' in model_name.casefold():         model_name_detail += 'tFNO'        # kFNO: koopman fourier neural operator (recommend to use)
+        elif 'tcfno' in model_name.casefold():        model_name_detail += 'tCFNO'       # tCFNO: koopman neural operator using a mixed convolutional+Fourier layer
+        elif 'kconv' in model_name.casefold():        model_name_detail += 'kConv'       # kConv: koopman convolution neural operator
+        elif 'conv' in model_name.casefold():         model_name_detail +=  'Conv'       # baseline CNN
+        elif 'kfno' in model_name.casefold():         model_name_detail += 'kFNO'        # kFNO: a reduced version (indentical to tFNO under certain parameter setting) 
+        elif 'fno' in model_name.casefold():          model_name_detail +=  'FNO'        # baseline FNO
 
         #--------------
         nDIM = params['nDIM']
@@ -417,18 +491,24 @@ class lib_Model:
         if params['data:ThicknessScale'] != 1:
             model_name_detail += 'tks{}_'.format ( params['data:ThicknessScale'] )
 
-        if  'fno' in model_name.casefold() :  # 'fourier' in model_name.casefold() or
+        if  'fno' in model_name.casefold():  # 'fourier' in model_name.casefold() or
             #---------------------
-            if   nDIM ==1:
-                if  type( params['fourier:modes_fourier'] ) is list:    model_name_detail  += 'm'+ str( params['fourier:modes_fourier'][0] )+'w'+str( params['fourier:width'])
-                else:                                                   model_name_detail  += 'm'+ str( params['fourier:modes_fourier'] )+'w'+str( params['fourier:width'])
-            elif nDIM ==2:
-                model_name_detail  += 'm' + str(params['fourier:modes_fourier'][0]) + '_' + str(params['fourier:modes_fourier'][1]) + 'w' + str(params['fourier:width'])
+            if   nDIM ==1: model_name_detail+= 'm'+ str(params['fourier:modes_fourier'][0])
+            elif nDIM ==2: model_name_detail+= 'm'+ str(params['fourier:modes_fourier'][0]) + '_' + str(params['fourier:modes_fourier'][1]) 
+
+            if 'revtfno' in model_name.casefold() and params['fourier:modes_fourier'] != params['fourier:modes_fourier_rev'] :
+                if   nDIM ==1:  model_name_detail  += 'rm'+ str( params['fourier:modes_fourier_rev'][0] )
+                elif nDIM ==2:  model_name_detail  += 'rm' + str(params['fourier:modes_fourier_rev'][0]) + '_' + str(params['fourier:modes_fourier_rev'][1]) 
+
+            model_name_detail +=  'w' + str(params['fourier:width'])
+     
+            if 'revtfno' in model_name.casefold() and params['fourier:width_rev'] != params['fourier:width']  :
+                model_name_detail += 'rw' + str(params['fourier:width_rev'])
             #---------------------
-            model_name_detail += params['fourier:basis_type']
+            model_name_detail += params['fourier:basis_type']   #'up2'  # 'dct[1]' 
 
 
-        if 'MS' in data_sys.sys_name or 'KS' in data_sys.sys_name :
+        if any( x in data_sys.sys_name  for x in ['MS','KS','KDV','Burgers'] ): # 'MS' in data_sys.sys_name or 'KS' in data_sys.sys_name :
             para_str_ = data_sys.para_name()
             for idx, each_para in enumerate( data_sys.list_para):
                 if idx == 0 or idx == len(data_sys.list_para)-1 :
@@ -485,26 +565,33 @@ class lib_Model:
         #---------
         if 'tfno' in model_name.casefold():
             
-            if params['fourier:reversible'] == True: 
-                model_name_detail += '_Rev'
-                if params['fourier:depth_conv']['rev']  != 2: 
-                    model_name_detail += 'D'+str( params['fourier:depth_conv']['rev'])
-            else: 
-                if  params['FourierTimeDIM'] == True:           
-                    model_name_detail +=  '_Ftime'
+            if params['fourier:reversible'] == False: 
 
-                if params['fourier:depth_conv']['tAdv'] != 2: 
-                    model_name_detail +=  '_tAdvD'+ str( params['fourier:depth_conv']['tAdv'] )
-                if params['fourier:depth_conv']['lift'] != 3: 
-                    model_name_detail +=  '_liftD'+ str( params['fourier:depth_conv']['lift'] )
-                if params['fourier:depth_conv']['proj'] != 1: 
-                    model_name_detail +=  '_projD'+ str( params['fourier:depth_conv']['proj'] )
+                if  params['FourierTimeDIM'] == True: model_name_detail +=  '_Ftime'
 
-            if params['fourier:method_WeightSharing']==1:  model_name_detail +=  '_share'
+            elif params['fourier:reversible'] == True:  
+               
+                if params['fourier:depth_conv']['rev']  != [2,2]: 
+                    model_name_detail += 'D'+ ''.join([str(d) for d in params['fourier:depth_conv']['rev']])
 
+            if params['fourier:depth_conv']['tAdv'] != 2:
+                model_name_detail +=  '_tAdvD'+ str( params['fourier:depth_conv']['tAdv'] )
+                if params['fourier:depth_conv']['tAdv'] == 1 and 'exp' in params['fourier:depth_conv']['tAdv_basis']:
+                    model_name_detail += '_' + params['fourier:depth_conv']['tAdv_basis']
+
+            if 'tAdv_last_nonlinear' in params['fourier:depth_conv']:
+                if params['fourier:depth_conv']['tAdv_last_nonlinear']:  model_name_detail +=  '_tAdvLastRelu'
+
+            if params['fourier:reversible'] == False: 
+                if params['fourier:depth_conv']['lift'] != 3:              model_name_detail +=  '_liftD'+ str( params['fourier:depth_conv']['lift'] )
+                if params['fourier:depth_conv']['proj'] != 1:              model_name_detail +=  '_projD'+ str( params['fourier:depth_conv']['proj'] )
+
+            #-----------
+            if params['fourier:method_WeightSharing']==1:       model_name_detail +=  '_share'
             if   params['fourier:method_SkipConnection']==0:    model_name_detail +=  '_noskip'
             elif params['fourier:method_SkipConnection']==-1:   model_name_detail +=  '_nohighskip'
 
+ 
         elif 'kfno' in model_name.casefold():
             if params['fourier:linearKoopmanAdv'] == True: model_name_detail +=  '_linearkoop'
             if params['FourierTimeDIM'] == True:           model_name_detail +=  '_Ftime'
@@ -553,7 +640,7 @@ class lib_Model:
         # if params['option_nOutputStep'] > 1:      model_name_detail += '_O{}'.format(params['T_out'])
         # elif params['option_nOutputStep']==1:
         model_name_detail += '_o{}'.format(params['T_out'])
-        if 'kfno' in model_name.casefold() or 'kconv' in model_name.casefold() or 'tfno' in model_name.casefold():
+        if 'kfno' in model_name.casefold() or 'kconv' in model_name.casefold() or 'tfno' in model_name.casefold() or 'tcfno' in model_name.casefold():
            if params['kTimeStepping'] != params['T_out']:  model_name_detail += '_k{}'.format(params['kTimeStepping'])
 
         print(model_name_detail)
@@ -629,19 +716,33 @@ class lib_DataGen:
             # train_a = load_a[ :Sims*TimeFact    , : , : ]
             # test_a  = load_a[  (Sims*TimeFact): , : , : ]
             # #----------------
-            dataset_train=  torch.utils.data.TensorDataset( torch.from_numpy(train_a), torch.zeros(train_a.shape[0]) , )
-            dataset_test =  torch.utils.data.TensorDataset( torch.from_numpy(test_a), torch.zeros(test_a.shape[0]) , )
+            dataset_train=  torch.utils.data.TensorDataset( torch.from_numpy(train_a).to( torch.get_default_dtype() ), torch.zeros(train_a.shape[0]) , )
+            dataset_test =  torch.utils.data.TensorDataset( torch.from_numpy(test_a).to( torch.get_default_dtype() ), torch.zeros(test_a.shape[0]) , )
 
 
-        elif 'MS' in data_sys.sys_name or 'KS' in data_sys.sys_name:
-            sequence_disp, sequence_disp_test, sequence_para,sequence_para_test = \
-               lib_DataGen.DataGen_siva( data_sys, params['T_in'],params['T_out'],nDIM=params['nDIM'],Nx=params['Nx'],
-                                         yB_estimate=params['data:yB_estimate'],AspectRatio_set=params['data:AspectRatio_set'],
-                                         nStep=params['data:nStep'],nStepSkip=params['data:nStepSkip'],dir_save_training_data=params['data:dir_save_training_data'] ) #,
-                                         #method_default_siva_data_gen=data_sys.method_default_siva_data_gen)
+        elif any( x in data_sys.sys_name  for x in ['MS','KS','KDV','Burgers'] ):
+            if 'KDV' in data_sys.sys_name or 'Burgers' in data_sys.sys_name   : # KDV or Burgers equation
+                sequence_disp, sequence_disp_test, sequence_para,sequence_para_test = \
+                    lib_DataGen.DataGen_KDV_or_Burgers(data_sys, params['T_in'],params['T_out'],nDIM=params['nDIM'],
+                                                nStep=params['data:nStep'],nStepSkip=params['data:nStepSkip'],dir_save_training_data=params['data:dir_save_training_data'] )  
+            else: # Sivashinky equation
+                sequence_disp, sequence_disp_test, sequence_para,sequence_para_test = \
+                    lib_DataGen.DataGen_siva( data_sys, params['T_in'],params['T_out'],nDIM=params['nDIM'],Nx=params['Nx'],
+                                                yB_estimate=params['data:yB_estimate'],AspectRatio_set=params['data:AspectRatio_set'],
+                                                nStep=params['data:nStep'],nStepSkip=params['data:nStepSkip'],dir_save_training_data=params['data:dir_save_training_data'] ) #,
+                                                #method_default_siva_data_gen=data_sys.method_default_siva_data_gen)
 
             train_disp, test_disp, train_PDEpara,test_PDEpara = \
                 lib_DataGen.np_array_To_torch_tensor(sequence_disp, sequence_disp_test,sequence_para,sequence_para_test,data_sys,params)
+            
+            if params['data:upsample'] > 1 and type( params['data:upsample'] ) is int: 
+                N = train_disp.shape[1]  # N is the number of grid points in the spatial dimension
+                M_upsample = params['data:upsample']
+                print('upsampling data by factor:',M_upsample)
+                x_ft       = torch.fft.rfftn(train_disp, dim=[1], norm="ortho") * np.sqrt(M_upsample);  x_ft [:,-1,:] = x_ft [:,-1,:] / M_upsample
+                train_disp = torch.fft.irfftn(   x_ft, s = M_upsample* N, dim=[1], norm='ortho' )
+                x_ft       = torch.fft.rfftn(test_disp, dim=[1], norm="ortho") * np.sqrt(M_upsample);  x_ft [:,-1,:] = x_ft [:,-1,:] / M_upsample
+                test_disp  = torch.fft.irfftn( x_ft, s = M_upsample* N, dim=[1], norm='ortho' )
 
             dataset_train, dataset_test =  torch.utils.data.TensorDataset( train_disp, train_PDEpara, ), torch.utils.data.TensorDataset( test_disp, test_PDEpara, )
 
@@ -679,26 +780,43 @@ class lib_DataGen:
             sequence_disp_test  = np.moveaxis(sequence_disp_test, 1, -2)
             #(2965, 2048, 11, 3)
             s = sequence_disp.shape
-            train_disp = torch.tensor(sequence_disp.reshape(s[0], s[1], s[2] * s[3]), dtype=torch.float)
-            train_PDEpara = torch.tensor(sequence_para, dtype=torch.float)
+            train_disp = torch.tensor(sequence_disp.reshape(s[0], s[1], s[2] * s[3]), dtype=torch.get_default_dtype() )
+            train_PDEpara = torch.tensor(sequence_para, dtype=torch.get_default_dtype() )
 
             s = sequence_disp_test.shape
-            test_disp = torch.tensor(sequence_disp_test.reshape(s[0], s[1], s[2] * s[3]), dtype=torch.float)
-            test_PDEpara = torch.tensor(sequence_para_test, dtype=torch.float)
+            test_disp = torch.tensor(sequence_disp_test.reshape(s[0], s[1], s[2] * s[3]), dtype=torch.get_default_dtype() )
+            test_PDEpara = torch.tensor(sequence_para_test, dtype=torch.get_default_dtype() )
         else:
             sequence_disp       = np.moveaxis(sequence_disp,      1, -1)
             sequence_disp_test  = np.moveaxis(sequence_disp_test, 1, -1)
             #(20000, 128, 21) in 1D ,  or , (20000, 128, 128, 21)  in 2D
-            train_disp = torch.repeat_interleave( torch.tensor(sequence_disp,dtype=torch.float), data_channel, dim=-1 )
-            train_PDEpara = torch.tensor(sequence_para, dtype=torch.float)
-            test_disp = torch.repeat_interleave(torch.tensor(sequence_disp_test, dtype=torch.float), data_channel, dim=-1)
-            test_PDEpara = torch.tensor(sequence_para_test, dtype=torch.float)
+            train_disp = torch.repeat_interleave( torch.tensor(sequence_disp,dtype=torch.get_default_dtype()  ), data_channel, dim=-1 )
+            train_PDEpara = torch.tensor(sequence_para, dtype=torch.get_default_dtype() )
+            test_disp = torch.repeat_interleave(torch.tensor(sequence_disp_test, dtype=torch.get_default_dtype()  ), data_channel, dim=-1)
+            test_PDEpara = torch.tensor(sequence_para_test, dtype=torch.get_default_dtype() )
 
 
         print('train_disp.shape, test_disp.shape, train_PDEpara.shape,test_PDEpara.shape')
         print(train_disp.shape, test_disp.shape, train_PDEpara.shape, test_PDEpara.shape)
 
         return train_disp, test_disp, train_PDEpara, test_PDEpara
+
+
+    @staticmethod
+    def DataGen_KDV_or_Burgers(data_sys, T_in,T_out, nDIM=1, 
+                    nStep=1, nStepSkip=1,
+                    dir_save_training_data = './data/') : #,method_default_siva_data_gen=1):
+        
+        if 'KDV' in data_sys.sys_name:           KDV_or_Burgers_Eq = CSolverKDV(data_sys.sys_name, data_sys.list_para ,nDIM) 
+        elif 'Burgers' in data_sys.sys_name:     KDV_or_Burgers_Eq = CSolverBurgers(data_sys.sys_name, data_sys.list_para ,nDIM) 
+        
+        list_xsol_train, list_xsol_test, list_para_train, list_para_test  = KDV_or_Burgers_Eq.generate_or_load_DEFAULT_sol_list(dir_save_training_data)
+        sequence_disp     , sequence_para      = libData.Reorg_list_xsol(list_xsol_train, list_para_train, T_out, T_in, nStep, nStepSkip, name_xsol = 'dsol')
+        sequence_disp_test, sequence_para_test = libData.Reorg_list_xsol(list_xsol_test,   list_para_test, T_out, T_in, nStep, nStepSkip, name_xsol = 'dsol')
+ 
+        return sequence_disp, sequence_disp_test, sequence_para,sequence_para_test
+
+
 
 
     @staticmethod
@@ -818,6 +936,7 @@ def tanh_to_entropy(tanh_y):
 class LpLoss(object):
     def __init__(self, d=2, p=2, size_average=True, reduction=True , tanh_loss=False ):
         super(LpLoss, self).__init__()
+
         #Dimension and Lp-norm type are postive
         assert d > 0 and p > 0
         self.d = d
@@ -868,6 +987,21 @@ class LpLoss(object):
 
 
 
+#----------------------------
+@torch.no_grad()
+def get_weight_decay_params(model: nn.Module):
+    params_decay = list()
+    params_no_decay = list()
+    for name, param in model.named_parameters():
+        #print('checking {}'.format(name))
+        if hasattr(param,'requires_grad') and not param.requires_grad: continue
+        if 'conv_timeAdv.weights' in name :
+            params_no_decay.append(param)
+        else:
+            params_decay.append(param)
+    return params_decay, params_no_decay
+
+#----------------------------
 
 
 class lib_ModelTrain:
@@ -884,18 +1018,38 @@ class lib_ModelTrain:
         T_in         = params['T_in']
         T_out        = params['T_out']
         #----------------------------------------------------------------------------------------
-        optimizer = params['optimizer_method']( model.parameters(), lr=params['train:learning_rate'], weight_decay=params['train:weight_decay'] )
+
+        #if 'exp' in model_name_detail:
+        if isinstance( model, RevtFNO_Nd ) and isinstance( model.conv_timeAdv, SpectralConv_MatrixExp_Nd) and 'raw' not in model_name_detail :   # and 'nonl' not in model_name_detail:
+            print('Disable weight decay on the SpectralConv_MatrixExp_Nd layer, and weight decay on other layers')
+            params_decay, params_no_decay = get_weight_decay_params(model)
+            optimizer = params['optimizer_method']( [ {'params': params_no_decay, 'weight_decay': 0                            }, 
+                                                      {'params': params_decay,    'weight_decay': params['train:weight_decay'] }, ] ,
+                                                    lr=params['train:learning_rate'] , eps=params['train:eps'] )
+                
+        else:
+            optimizer = params['optimizer_method']( model.parameters(), lr=params['train:learning_rate'], weight_decay=params['train:weight_decay'] , eps=params['train:eps'] )
+
+        # if 'step' in params['train:scheduler'].casefold():
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=params['train:scheduler_step'], gamma=params['train:scheduler_gamma'])
+        # elif 'plat' in params['train:scheduler'].casefold(): 
+        #     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=30, verbose=True,threshold=1e-4)
+        # elif 'cycle' in params['train:scheduler'].casefold():
+        #     scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer,  max_lr=params['train:learning_rate'], steps_per_epoch=len(dataset_train), epochs= params['train:epochs'])
+        # else:
+        #     raise ValueError('Unknown scheduler method: {}'.format(params['train:scheduler']))
         
         if 'tanh_loss' in params and params['nDIM']==2:
-            myloss = LpLoss(size_average=False , tanh_loss = params['tanh_loss'] )
+            myloss = LpLoss(size_average= True , tanh_loss = params['tanh_loss'] )
         else:
-            myloss = LpLoss(size_average=False ) 
+            myloss = LpLoss(size_average= True ) 
 
         #--------------------------------------------
         list_output_info = []
         epoch0 = 0
+
         filename_Saved_Model =  params['train:checkpoint_dir'] + '/' + model_name_detail         # model = torch.load(filename_Saved_Model,map_location=torch.device(run_device))
+        
 
         if params['train:checkpoint_resume'] is not None:
             if params['train:checkpoint_resume'] == '_best.pt':
@@ -922,10 +1076,14 @@ class lib_ModelTrain:
 
 
 
+
         #------------------
         ntrain = len(dataset_train)
         ntest  = len(dataset_test)
         print('ntrain=', ntrain, ' ,ntest=', ntest)
+
+        NUM_gradient_accumulation_STEPS = params['train:NUM_gradient_accumulation_STEPS']
+
 
         if params['parallel_run']:
 
@@ -944,7 +1102,7 @@ class lib_ModelTrain:
             model = DDP(model, device_ids=[local_rank])
 
             train_loader =  torch.utils.data.DataLoader( dataset_train, batch_size=params['train:batch_size'], shuffle=False, sampler=torch.utils.data.distributed.DistributedSampler(dataset_train) )
-            test_loader  =  torch.utils.data.DataLoader( dataset_test, batch_size=params['train:batch_size'], shuffle=False, sampler=torch.utils.data.distributed.DistributedSampler(dataset_test)  )
+            test_loader  =  torch.utils.data.DataLoader( dataset_test,  batch_size=params['train:batch_size'], shuffle=False, sampler=torch.utils.data.distributed.DistributedSampler(dataset_test)  )
 
             print('gpu[{}] here!'.format(global_rank) )
         else:
@@ -953,36 +1111,61 @@ class lib_ModelTrain:
             device =  torch.device('cuda')
             model = model.to(device)
             train_loader =  torch.utils.data.DataLoader( dataset_train, batch_size=params['train:batch_size'], shuffle=True)
-            test_loader  =  torch.utils.data.DataLoader( dataset_test, batch_size=params['train:batch_size'], shuffle=True)
+            test_loader  =  torch.utils.data.DataLoader( dataset_test,  batch_size=params['train:batch_size'], shuffle=True)
 
         #----
         if global_rank==0:
             writer_comment = f'{model_name_detail}_tb'
-            if params['tensorboard_logdir_prefix'] is None:  writer = SummaryWriter(comment=writer_comment)
-            else:                                            writer = SummaryWriter(log_dir= 'runs/'+ params['tensorboard_logdir_prefix'] + writer_comment)
+            
+            tensorboard_logdir = 'runs/'+ params['tensorboard_logdir_prefix'] + writer_comment
+            
+            # Delete the folder if it exists
+            if epoch0 == 0: shutil.rmtree(tensorboard_logdir, ignore_errors=True)
+
+            writer = SummaryWriter(log_dir=tensorboard_logdir , purge_step= epoch0 )
+
+
+            #if params['tensorboard_logdir_prefix'] is None:  writer = SummaryWriter(comment=writer_comment, purge_step=epoch0)
+            #else:                                            writer = SummaryWriter(log_dir= 'runs/'+ params['tensorboard_logdir_prefix'] + writer_comment, purge_step=epoch0 )
+            
+
+
         #----
 
+        # if params['train:grad_scaler'] == True:
+        #     scaler = torch.cuda.amp.GradScaler()
 
+        if params['train:nan_loss_save'] > 0:
+            cpu_Saved_Valid_model_state_dict, cpu_Saved_Valid_optimizer_state_dict = None , None
+        
+
+        
         txt_SaveCtr = ''
         #-----------------
         for ep in range( epoch0, params['train:epochs']):
+
             model.train()
+            optimizer.zero_grad()
+
             t1 = default_timer()
 
             train_loss = 0
-            for  train_a, train_p in train_loader:
 
-                assert train_a.shape[-1] == (T_in + T_out)*data_channel, "train_a.shape[-1]==(T_in+T_out)*data_channel"
+            loss_accum_batch = 0
+            ntrain_actual = 0
 
-                train_a = train_a.to(device)  # train_a.shape[-1]== (T_in+T_out)*data_channel
-                train_p = train_p.to(device)  # train_p.shape[-1]== (T_in+T_out)*data_channel
+            for idx, (train_a, train_p) in enumerate(train_loader): # To enable gradient accumulation, we use enumerate to get the index
+            #for train_a, train_p in train_loader:
+            #    optimizer.zero_grad()
+        
+                train_a = train_a.to(device)  
+                train_p = train_p.to(device)  
                 current_batch_size = train_a.shape[0]
 
                 x  = train_a[...,                 : T_in       *data_channel]  # x.shape[-1]== T_in*data_channel
                 yy = train_a[...,T_in*data_channel:(T_in+T_out)*data_channel]  # yy.shape[-1]== T_out*data_channel
                 p  = train_p
-
-                loss = 0
+                # ---
                 if 'std' in params['TrainLoss'] :
                     pred = torch.zeros_like( yy , device= train_a.device)
                     for t in range(T_out):
@@ -991,26 +1174,66 @@ class lib_ModelTrain:
                         else:                                    im = model(x,p)
                         pred[...,t*data_channel:(t+1)*data_channel] = im
                         x = im
-                    loss +=  myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
+                    loss =  myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
 
                 if 'koop' in params['TrainLoss'] :
                     #pred = torch.zeros_like( yy , device= train_a.device)
                     if params['num_PDEParameters'] ==0:     pred = model(train_a[..., :1])
                     else:                                   pred = model(train_a[..., :1],p)
-                    loss += myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
+                    loss = myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
+                
+    
+                # Backward pass ------
 
-                #--------------
-                train_loss += loss.item()
+                # --- allow gradient accumulation when there is not sufficent GPU memory for larger batch ---
+                batch_size_accum = params['train:batch_size'] * NUM_gradient_accumulation_STEPS
+                if idx + 1 <= (ntrain // batch_size_accum ) * NUM_gradient_accumulation_STEPS:
+                    loss = loss / NUM_gradient_accumulation_STEPS
+                else: 
+                    loss = loss/ ( (ntrain % batch_size_accum) / current_batch_size )
+                # --- allow gradient accumulation ---
 
-                optimizer.zero_grad()
                 loss.backward()
 
-                if params['train:gradient_clip'] is not None:
-                    if params['parallel_run']:   nn.utils.clip_grad_norm_(model.module.parameters(), params['train:gradient_clip'] )
-                    else:                        nn.utils.clip_grad_norm_(model.parameters(),        params['train:gradient_clip'] )
+                loss_accum_batch += loss.item() 
 
-                optimizer.step()
-                print('', end='.')
+                if ( (idx + 1) % NUM_gradient_accumulation_STEPS  == 0) or ( idx + 1 == len(train_loader) ):
+                    loss_batch = loss_accum_batch
+                    loss_accum_batch = 0          # reset the accumulated loss for the next (accumulated) batch
+                    #-------------------
+                    if params['train:nan_loss_save'] > 0:
+                        if np.isnan( loss_batch ) or (ep>=1 and loss_batch > 10 ) :
+                            print(f"Too large loss {loss_batch} at epoch {ep}. Restoring previous checkpoint")
+
+                            del loss, pred, train_a, train_p 
+                            optimizer.zero_grad(set_to_none=True)  # Clear gradients to free GPU memerory 
+                            torch.cuda.empty_cache()
+                            gc.collect()               # Collect garbage to free GPU memory
+                            model.load_state_dict(cpu_Saved_Valid_model_state_dict)  # Restore the model state dict
+                            optimizer.load_state_dict(cpu_Saved_Valid_optimizer_state_dict)  # Restore the optimizer state dict
+                            continue  # skip this batch and continue to the next one
+                        else:
+                            
+                            #min_train_loss = min( min_train_loss, loss_batch  )
+                            if 0< loss_batch < params['train:nan_loss_save']  :  
+                                ### Save valid model after successful step ###
+                                cpu_Saved_Valid_model_state_dict = deepcopy( model.state_dict() )  # Save a copy of the model state dict
+                                for k, v in cpu_Saved_Valid_model_state_dict.items():      cpu_Saved_Valid_model_state_dict[k] = v.to('cpu')
+                                cpu_Saved_Valid_optimizer_state_dict = deepcopy( optimizer.state_dict() )  # Save a copy of the optimizer state dict
+
+                    #-------------------
+                    counts = batch_size_accum if ((idx+1) % NUM_gradient_accumulation_STEPS == 0) else  ntrain%batch_size_accum 
+                    ntrain_actual += counts 
+                    train_loss    += loss_batch * counts  # accumulate the loss for the batch
+                    #-------------------
+
+                    if params['parallel_run']:  nn.utils.clip_grad_norm_(model.module.parameters(), params['train:gradient_clip'] )
+                    else:                       nn.utils.clip_grad_norm_(model.parameters(),        params['train:gradient_clip'] )
+                    optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)  # Clear gradients to free GPU memerory
+                    #-------
+                    print('', end='.')
+
 
             test_loss  = 0
             if ntest > 10:     # validation test
@@ -1026,7 +1249,6 @@ class lib_ModelTrain:
                         p = test_p
                         # --------------
 
-                        loss = 0
                         if 'std' in params['TrainLoss'] :
                             pred = torch.zeros_like( yy , device= test_a.device)
                             for t in range(T_out):
@@ -1035,24 +1257,29 @@ class lib_ModelTrain:
                                 else:                                   im = model(x,p)
                                 pred[...,t*data_channel:(t+1)*data_channel] = im
                                 x = im
-                            loss += myloss(pred.reshape(current_batch_size, -1),  yy.reshape(current_batch_size, -1))
+                            loss = myloss( pred.reshape(current_batch_size, -1),  yy.reshape(current_batch_size, -1))
 
                         if 'koop' in params['TrainLoss'] :
                             #pred = torch.zeros_like( yy , device= test_a.device)
                             if params['num_PDEParameters'] ==0:     pred = model(test_a[..., :1])
                             else:                                   pred = model(test_a[..., :1],p)
-                            loss += myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
+                            loss = myloss( pred.reshape(current_batch_size, -1), yy.reshape(current_batch_size, -1)  )
 
-                        test_loss += loss.item()
+                        test_loss += loss.item()*current_batch_size
                         # --------------
 
+            if params['train:nan_loss_save'] > 0:
+                assert ntrain_actual/ntrain > 0.8, "count_train_size/ntrain should be greater than 0.8, but got {}".format(ntrain_actual/ntrain)
+
+            assert np.isfinite(train_loss) , "train_loss is NaN or Inf"
+            assert np.isfinite(test_loss)  , "test_loss is NaN or Inf"
 
             if params['parallel_run']:
                 # In order to do the sum across devices, the variable needs to be a
                 # tensor with size of at least 1. So it should not be a scalar tensor, if it is
                 # you will need to put it into a 1-d tensor.
                 torch.distributed.barrier()
-                l2__for_print_due_to_ddp = torch.tensor([train_loss ,test_loss], dtype=torch.float).to(local_rank)
+                l2__for_print_due_to_ddp = torch.tensor([train_loss ,test_loss], dtype=torch.get_default_dtype() ).to(local_rank)
                 # Then, you perform the reduction (SUM in this case) across all devices
                 torch.distributed.all_reduce( l2__for_print_due_to_ddp , op=torch.distributed.ReduceOp.SUM)
                 train_loss = l2__for_print_due_to_ddp[0].item()
@@ -1060,7 +1287,12 @@ class lib_ModelTrain:
 
 
             t2 = default_timer()
+
+            # if 'plat' in params['train:scheduler'].casefold(): 
+            #     scheduler.step(test_loss / ntest)
+            # else:
             scheduler.step()
+
             print('')
 
             # -----------------------
@@ -1070,7 +1302,7 @@ class lib_ModelTrain:
                     for key, value in output_dict.items():     print(value, end=' ')
                     print('')
 
-            output_info = (ep,   t2 - t1, train_loss / ntrain, test_loss / ntest )
+            output_info = (ep,   t2 - t1, train_loss / ntrain_actual, test_loss / ntest )
             list_output_info.append(output_info)
 
             if global_rank == 0 :
@@ -1079,7 +1311,7 @@ class lib_ModelTrain:
                 save_train_log(filename_Saved_Model, output_dict)
 
                 # ----
-                writer.add_scalars('loss', {'train_full':train_loss / ntrain , 'test_full':test_loss / ntest } , ep )
+                writer.add_scalars('loss', {'train_full':train_loss / ntrain_actual , 'test_full':test_loss / ntest } , ep )
                 #writer.add_scalar('time[s]', t2-t1, ep)
                 if 'tensorboard_fig1d' in params:
                     fig = params['tensorboard_fig1d'](ep, device)
@@ -1110,19 +1342,26 @@ class lib_ModelTrain:
                     torch.save( model.module , filename_SaveNow )
                 else:
                     torch.save( model , filename_SaveNow )
-
+    
             # --------------------
             #if global_rank == 0 and output_info[1]> 30 and np.argmin( np.array(list_output_info )[:,2]) == len( np.array(list_output_info)[:,2] )- 1  and ep1%5==0:
-            if global_rank == 0 and np.argmin( np.array(list_output_info )[:,2]) == len( np.array(list_output_info)[:,2] )- 1  and ep1%5==0:
+            if global_rank == 0 and np.argmin( np.array(list_output_info )[:,-1]) == len( np.array(list_output_info)[:,-1] )- 1  and ep1%params['train:nstep_save_best']==0:
+                # Save the best model
+                # if True: 
+                #     filename_SaveNow = filename_Saved_Model+'_best'
+                #     print(filename_SaveNow)
+                #     if params['parallel_run']:torch.save( model.module , filename_SaveNow )
+                #     else:   torch.save( model , filename_SaveNow )
+                # else:
                 filename_SaveNow = filename_Saved_Model+'_best.pt'
                 print(filename_SaveNow)
                 if filename_SaveNow[-3:] == '.pt':
                     if params['parallel_run']:
                         torch.save({ 'model_state_dict': model.module.state_dict(),
-                                     'ep': ep1,  'loss': {'train_full':train_loss / ntrain, 'test_full':test_loss / ntest }         }, filename_SaveNow )
+                                    'ep': ep1,  'loss': {'train_full':train_loss / ntrain_actual, 'test_full':test_loss / ntest }         }, filename_SaveNow )
                     else:
                         torch.save({ 'model_state_dict': model.state_dict(),        'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
-                                     'ep': ep1,  'loss': {'train_full':train_loss / ntrain, 'test_full':test_loss / ntest }         }, filename_SaveNow )
+                                    'ep': ep1,  'loss': {'train_full':train_loss / ntrain_actual, 'test_full':test_loss / ntest }         }, filename_SaveNow )
 
 
         # ---------------------------

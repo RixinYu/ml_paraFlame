@@ -22,7 +22,8 @@ class libData:
         assert nStepSkip <= nStep
         assert np.mod(nStep, nStepSkip) == 0
 
-        if 'level' in name_xsol.casefold():
+        #if 'level' in name_xsol.casefold():
+        if xsol.ndim == 4:  # 
             num_traj, length_sol, Nx, Ny = xsol.shape
         else:  # 'dsol'
             num_traj, length_sol, Nx = xsol.shape
@@ -31,7 +32,8 @@ class libData:
         num__split_seq_pierce = ((     (length_sol - 1) // nStep) - T_in) // T_out -1
         print('Reorg_xsol:num__split_seq_pierce', num__split_seq_pierce)
 
-        if 'level' in name_xsol.casefold():
+        #if 'level' in name_xsol.casefold():
+        if xsol.ndim == 4:  
             sequence_disp = np.zeros(((nStep // nStepSkip) * num__split_seq_pierce * num_traj, T_out + T_in, Nx, Ny))
         else:  # 'dsol'
             sequence_disp = np.zeros(((nStep // nStepSkip) * num__split_seq_pierce * num_traj, T_out + T_in, Nx))
